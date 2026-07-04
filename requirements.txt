@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+langchain
+python-dotenv
+python-multipart
+dashscope
+pydantic
+redis
+faiss-cpu
+numpy

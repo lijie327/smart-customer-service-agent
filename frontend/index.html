@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能客服系统 - Multi-Agent Customer Service</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Markdown渲染 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 图标库 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 左侧：工单列表和统计 -->
+        <aside class="sidebar left-sidebar" id="leftSidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-robot"></i> 智能客服</h2>
+                <button class="sidebar-toggle" id="toggleLeftSidebar">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <!-- 统计面板 -->
+            <div class="stats-panel">
+                <div class="stat-card">
+                    <div class="stat-icon">
+                        <i class="fas fa-comments"></i>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="totalTickets">0</div>
+                        <div class="stat-label">处理量</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon success">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="successRate">0%</div>
+                        <div class="stat-label">成功率</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon time">
+                        <i class="fas fa-clock"></i>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="avgTime">0s</div>
+                        <div class="stat-label">平均时长</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 新建对话按钮 -->
+            <button class="btn-new-chat" id="btnNewChat">
+                <i class="fas fa-plus"></i> 新建对话
+            </button>
+
+            <!-- 工单列表 -->
+            <div class="ticket-list" id="ticketList">
+                <div class="empty-state">
+                    <i class="fas fa-inbox"></i>
+                    <p>暂无对话记录</p>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 中间：对话区 -->
+        <main class="chat-area">
+            <!-- 顶部栏 -->
+            <div class="chat-header">
+                <button class="mobile-toggle" id="toggleLeft">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <div class="chat-title">
+                    <h3 id="currentChatTitle">新对话</h3>
+                    <span class="chat-status" id="chatStatus">
+                        <i class="fas fa-circle"></i> 在线
+                    </span>
+                </div>
+                <button class="mobile-toggle" id="toggleRight">
+                    <i class="fas fa-info-circle"></i>
+                </button>
+            </div>
+
+            <!-- 消息区 -->
+            <div class="messages-container" id="messagesContainer">
+                <div class="welcome-message">
+                    <div class="welcome-icon">
+                        <i class="fas fa-headset"></i>
+                    </div>
+                    <h2>欢迎使用智能客服系统</h2>
+                    <p>我是您的智能客服助手，可以帮您处理退货退款、订单查询、技术支持等问题。</p>
+                    <div class="quick-actions">
+                        <button class="quick-btn" data-message="如何申请退款？">
+                            <i class="fas fa-undo"></i> 申请退款
+                        </button>
+                        <button class="quick-btn" data-message="查询订单状态">
+                            <i class="fas fa-box"></i> 订单查询
+                        </button>
+                        <button class="quick-btn" data-message="产品使用问题">
+                            <i class="fas fa-question-circle"></i> 技术支持
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 输入区 -->
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea
+                        id="messageInput"
+                        placeholder="输入您的问题... (Shift+Enter 换行，Enter 发送)"
+                        rows="1"
+                    ></textarea>
+                    <button class="btn-send" id="btnSend" disabled>
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+                <div class="input-hint">
+                    <span>按 Enter 发送，Shift+Enter 换行</span>
+                </div>
+            </div>
+        </main>
+
+        <!-- 右侧：工单详情 -->
+        <aside class="sidebar right-sidebar" id="rightSidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-info-circle"></i> 工单详情</h2>
+                <button class="sidebar-toggle" id="toggleRightSidebar">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <div class="detail-content" id="detailContent">
+                <div class="empty-state">
+                    <i class="fas fa-clipboard-list"></i>
+                    <p>选择一个工单查看详情</p>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Toast提示 -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- 加载遮罩 -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p>正在连接服务...</p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
