@@ -35,6 +35,15 @@ const elements = {
     totalTickets: document.getElementById('totalTickets'),
     successRate: document.getElementById('successRate'),
     avgTime: document.getElementById('avgTime'),
+    escalationCount: document.getElementById('escalationCount'),
+
+    // 链路追踪
+    btnTraces: document.getElementById('btnTraces'),
+    tracesModal: document.getElementById('tracesModal'),
+    closeTracesModal: document.getElementById('closeTracesModal'),
+    tracesList: document.getElementById('tracesList'),
+    tracesEscalatedOnly: document.getElementById('tracesEscalatedOnly'),
+    btnRefreshTraces: document.getElementById('btnRefreshTraces'),
 
     // 中间对话区
     messagesContainer: document.getElementById('messagesContainer'),
@@ -42,6 +51,7 @@ const elements = {
     btnSend: document.getElementById('btnSend'),
     currentChatTitle: document.getElementById('currentChatTitle'),
     chatStatus: document.getElementById('chatStatus'),
+    toggleTheme: document.getElementById('toggleTheme'),
 
     // 右侧边栏
     rightSidebar: document.getElementById('rightSidebar'),
@@ -66,6 +76,9 @@ async function initializeApp() {
     try {
         // 绑定事件
         bindEvents();
+
+        // 应用已保存主题
+        applyTheme((() => { try { return localStorage.getItem('cs_theme') || 'dark'; } catch (e) { return 'dark'; } })());
 
         // 配置marked
         configureMarked();
@@ -123,12 +136,24 @@ function bindEvents() {
     // 新建对话
     elements.btnNewChat?.addEventListener('click', createNewSession);
 
+    // 链路追踪弹窗
+    elements.btnTraces?.addEventListener('click', openTracesModal);
+    elements.closeTracesModal?.addEventListener('click', () => elements.tracesModal?.classList.remove('open'));
+    elements.btnRefreshTraces?.addEventListener('click', loadTraces);
+    elements.tracesEscalatedOnly?.addEventListener('change', loadTraces);
+    elements.tracesModal?.addEventListener('click', (e) => {
+        if (e.target === elements.tracesModal) elements.tracesModal.classList.remove('open');
+    });
+
     // 消息输入
     elements.messageInput?.addEventListener('input', handleInputChange);
     elements.messageInput?.addEventListener('keydown', handleInputKeydown);
 
     // 发送按钮
     elements.btnSend?.addEventListener('click', sendMessage);
+
+    // 主题切换
+    elements.toggleTheme?.addEventListener('click', toggleTheme);
 
     // 快捷按钮
     document.querySelectorAll('.quick-btn').forEach(btn => {
@@ -168,6 +193,28 @@ function toggleSidebar(side) {
     } else if (side === 'right') {
         elements.rightSidebar.classList.toggle('open');
     }
+}
+
+/**
+ * 应用主题（深 / 浅）
+ */
+function applyTheme(theme) {
+    const isLight = theme === 'light';
+    document.documentElement.setAttribute('data-theme', isLight ? 'light' : 'dark');
+    if (elements.toggleTheme) {
+        elements.toggleTheme.innerHTML = isLight
+            ? '<i class="fas fa-sun"></i>'
+            : '<i class="fas fa-moon"></i>';
+    }
+    try { localStorage.setItem('cs_theme', isLight ? 'light' : 'dark'); } catch (e) {}
+}
+
+/**
+ * 切换主题
+ */
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme');
+    applyTheme(current === 'light' ? 'dark' : 'light');
 }
 
 /**
@@ -375,6 +422,10 @@ async function streamChat(message, session) {
     let confidence = 0;
     let actions = [];
     let ticketId = null;
+    let escalated = false;
+    let escalatedReason = null;
+    let escalatedPriority = null;
+    let humanTicketId = null;
 
     removeTypingIndicator();
 
@@ -384,69 +435,100 @@ async function streamChat(message, session) {
 
     const bubbleElement = messageElement.querySelector('.message-bubble');
 
+    // 处理单条 SSE 事件（供下面的循环与流结束时的残留行复用）
+    const handleSseEvent = (data) => {
+        switch (data.type) {
+            case 'routing':
+                currentAgent = data.agent;
+                confidence = data.confidence;
+                session.currentAgent = currentAgent;
+                session.confidence = confidence;
+                updateMessageAgent(messageElement, currentAgent);
+                updateTicketDetail(session);
+                break;
+
+            case 'token':
+                assistantMessage += data.token;
+                bubbleElement.innerHTML = renderMarkdown(assistantMessage);
+                scrollToBottom();
+                break;
+
+            case 'tool_call':
+                const toolCallElement = createToolCallElement(data);
+                bubbleElement.appendChild(toolCallElement);
+                actions.push(`调用工具: ${data.tool_name}`);
+                session.actions = actions;
+                updateTicketDetail(session);
+                scrollToBottom();
+                break;
+
+            case 'escalation':
+                escalated = true;
+                escalatedReason = data.reason;
+                escalatedPriority = data.priority;
+                humanTicketId = data.human_ticket_id;
+                session.escalated = true;
+                session.escalation_reason = data.reason;
+                session.escalation_priority = data.priority;
+                session.human_ticket_id = data.human_ticket_id;
+                // 转人工卡片作为消息气泡的兄弟节点，避免被后续 token 渲染覆盖
+                messageElement.appendChild(createEscalationCard(data));
+                updateTicketDetail(session);
+                scrollToBottom();
+                break;
+
+            case 'done':
+                ticketId = data.ticket_id;
+                if (data.escalated) {
+                    escalated = true;
+                    escalatedReason = data.escalated_reason || escalatedReason;
+                    session.escalated = true;
+                    session.escalation_reason = escalatedReason;
+                }
+                break;
+
+            case 'error':
+                // 直接在当前气泡显示错误信息，不抛出异常
+                assistantMessage = assistantMessage || '';
+                if (!assistantMessage.trim()) {
+                    assistantMessage = '抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。';
+                } else {
+                    assistantMessage += '\n\n⚠️ 系统处理异常，请稍后重试。';
+                }
+                bubbleElement.innerHTML = renderMarkdown(assistantMessage);
+                scrollToBottom();
+                break;
+        }
+    };
+
+    // 按行缓冲解析 SSE：网络分包可能把一个 data 行拆成两半，
+    // 必须跨 read 拼接完整行后再解析，否则会丢事件。
+    let sseBuffer = '';
+    const processSseLine = (rawLine) => {
+        const line = rawLine.trim();
+        if (!line.startsWith('data: ')) return;
+        try {
+            handleSseEvent(JSON.parse(line.slice(6)));
+        } catch (e) {
+            // JSON 解析失败等非关键错误静默忽略；其他异常向上抛给外层 catch
+            if (e && e.message && !e.message.includes('JSON')) throw e;
+        }
+    };
+
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-            if (line.startsWith('data: ')) {
-                try {
-                    const data = JSON.parse(line.slice(6));
-
-                    switch (data.type) {
-                        case 'routing':
-                            currentAgent = data.agent;
-                            confidence = data.confidence;
-                            session.currentAgent = currentAgent;
-                            session.confidence = confidence;
-                            updateMessageAgent(messageElement, currentAgent);
-                            updateTicketDetail(session);
-                            break;
-
-                        case 'token':
-                            assistantMessage += data.token;
-                            bubbleElement.innerHTML = renderMarkdown(assistantMessage);
-                            scrollToBottom();
-                            break;
-
-                        case 'tool_call':
-                            const toolCallElement = createToolCallElement(data);
-                            bubbleElement.appendChild(toolCallElement);
-                            actions.push(`调用工具: ${data.tool_name}`);
-                            session.actions = actions;
-                            updateTicketDetail(session);
-                            scrollToBottom();
-                            break;
-
-                        case 'done':
-                            ticketId = data.ticket_id;
-                            break;
-
-                        case 'error':
-                            // 直接在当前气泡显示错误信息，不抛出异常
-                            // 避免被内层 catch 吞掉导致界面显示空白气泡
-                            assistantMessage = assistantMessage || '';
-                            if (!assistantMessage.trim()) {
-                                assistantMessage = '抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。';
-                            } else {
-                                assistantMessage += '\n\n⚠️ 系统处理异常，请稍后重试。';
-                            }
-                            bubbleElement.innerHTML = renderMarkdown(assistantMessage);
-                            scrollToBottom();
-                            break;
-                    }
-                } catch (e) {
-                    // JSON 解析失败等非关键错误静默忽略
-                    // 如果是其他异常则重新抛出，让外层 catch 处理
-                    if (e.message && !e.message.includes('JSON')) {
-                        throw e;
-                    }
-                }
-            }
+        sseBuffer += decoder.decode(value, { stream: true });
+        const parts = sseBuffer.split('\n');
+        sseBuffer = parts.pop() || '';   // 保留最后不完整的一行，等下次拼接
+        for (const line of parts) {
+            processSseLine(line);
         }
+    }
+    // 流结束时若仍有残留的半行，尝试作为最后一条事件处理
+    if (sseBuffer.trim()) {
+        processSseLine(sseBuffer);
     }
 
     // 添加助手消息到会话
@@ -456,7 +538,11 @@ async function streamChat(message, session) {
         timestamp: new Date().toISOString(),
         agent: currentAgent,
         confidence: confidence,
-        actions: actions
+        actions: actions,
+        escalated: escalated,
+        escalated_reason: escalatedReason,
+        escalated_priority: escalatedPriority,
+        human_ticket_id: humanTicketId
     };
     session.messages.push(assistantMsg);
 
@@ -495,6 +581,7 @@ function createAssistantMessageElement() {
 function updateMessageAgent(messageElement, agent) {
     const agentLabel = messageElement.querySelector('.message-agent');
     const agentText = messageElement.querySelector('.message-agent span');
+    const avatar = messageElement.querySelector('.message-avatar');
 
     const agentNames = {
         'refund': '退货退款专员',
@@ -506,6 +593,11 @@ function updateMessageAgent(messageElement, agent) {
     agentLabel.className = `message-agent agent-${agent}`;
     agentText.textContent = agentNames[agent] || agent;
     agentLabel.style.display = 'inline-flex';
+
+    // 助手头像按 Agent 着色
+    if (avatar) {
+        avatar.className = `message-avatar avatar-${agent}`;
+    }
 }
 
 /**
@@ -660,9 +752,88 @@ function getAgentName(agent) {
         'tech_support': '技术支持专家',
         'order_query': '订单查询专员',
         'general': '通用客服',
+        'human': '人工客服',
         'router': '路由Agent'
     };
     return names[agent] || agent;
+}
+
+/**
+ * 创建转人工卡片（聊天气泡内展示）
+ */
+function createEscalationCard(data) {
+    const card = document.createElement('div');
+    card.className = 'escalation-card';
+    const priorityLabel = {
+        'low': '低', 'normal': '普通', 'high': '高', 'urgent': '紧急'
+    }[data.priority] || '普通';
+    card.innerHTML = `
+        <div class="escalation-header">
+            <i class="fas fa-user-shield"></i>
+            <span>已为您转接人工客服</span>
+            <span class="escalation-priority priority-${data.priority || 'normal'}">${priorityLabel}</span>
+        </div>
+        <div class="escalation-body">
+            <div class="escalation-row"><span class="escalation-key">原因</span><span>${escapeHtml(data.reason || '自动转人工兜底')}</span></div>
+            ${data.estimated_response_time ? `<div class="escalation-row"><span class="escalation-key">预计响应</span><span>${escapeHtml(data.estimated_response_time)}</span></div>` : ''}
+            ${data.human_ticket_id ? `<div class="escalation-row"><span class="escalation-key">人工工单</span><span>${escapeHtml(data.human_ticket_id)}</span></div>` : ''}
+        </div>
+    `;
+    return card;
+}
+
+/**
+ * 打开链路追踪弹窗
+ */
+async function openTracesModal() {
+    elements.tracesModal?.classList.add('open');
+    await loadTraces();
+}
+
+/**
+ * 加载并渲染链路追踪
+ */
+async function loadTraces() {
+    if (!elements.tracesList) return;
+    try {
+        const only = elements.tracesEscalatedOnly?.checked ? 'true' : 'false';
+        const response = await fetch(`${API_BASE}/api/traces?limit=50&escalated_only=${only}`);
+        const data = await response.json();
+        const traces = data.traces || [];
+
+        if (!traces.length) {
+            elements.tracesList.innerHTML = `
+                <div class="empty-state">
+                    <i class="fas fa-stream"></i>
+                    <p>暂无链路数据，发起对话后将自动记录</p>
+                </div>`;
+            return;
+        }
+
+        elements.tracesList.innerHTML = traces.map(t => {
+            const spans = (t.spans || []).map(s =>
+                `<span class="trace-span">${escapeHtml(s.name)} <b>${s.duration_ms}ms</b></span>`
+            ).join('');
+            const escBadge = t.escalated
+                ? `<span class="trace-escalated"><i class="fas fa-user-shield"></i> 转人工</span>`
+                : '';
+            return `
+                <div class="trace-card">
+                    <div class="trace-card-head">
+                        <span class="trace-msg">${escapeHtml(t.message)}</span>
+                        ${escBadge}
+                    </div>
+                    <div class="trace-meta">
+                        <span>总耗时 <b>${t.total_ms}ms</b></span>
+                        <span>请求 ${escapeHtml(t.request_id.substring(0, 8))}</span>
+                    </div>
+                    <div class="trace-spans">${spans || '<span class="trace-span trace-span-empty">无 span</span>'}</div>
+                </div>`;
+        }).join('');
+    } catch (error) {
+        console.error('加载链路追踪失败:', error);
+        elements.tracesList.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle"></i><p>加载失败</p></div>`;
+    }
 }
 
 /**
@@ -670,10 +841,37 @@ function getAgentName(agent) {
  */
 function renderMarkdown(text) {
     if (typeof marked !== 'undefined') {
-        return marked.parse(text);
+        return sanitizeHtml(marked.parse(text));
     }
-    // 简单的换行处理
+    // 简单的换行处理（已转义，避免 XSS）
     return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+/**
+ * 轻量 HTML 净化：防御 LLM / 用户内容注入脚本。
+ * 优先使用 DOMPurify（若前端引入），否则用内置规则兜底。
+ */
+function sanitizeHtml(html) {
+    if (typeof DOMPurify !== 'undefined') {
+        return DOMPurify.sanitize(html);
+    }
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    div.querySelectorAll('script, iframe, object, embed, style, link, meta').forEach(el => el.remove());
+    div.querySelectorAll('*').forEach(el => {
+        Array.from(el.attributes).forEach(attr => {
+            const name = attr.name.toLowerCase();
+            const val = (attr.value || '').toLowerCase();
+            if (name.startsWith('on') || val.includes('javascript:')) {
+                el.removeAttribute(attr.name);
+            }
+        });
+        if (el.tagName === 'A') {
+            const href = (el.getAttribute('href') || '').toLowerCase();
+            if (href.includes('javascript:')) el.removeAttribute('href');
+        }
+    });
+    return div.innerHTML;
 }
 
 /**
@@ -749,7 +947,25 @@ function renderTicketDetail(session) {
     const agentClass = session.currentAgent ? `agent-${session.currentAgent}` : '';
     const agentName = session.currentAgent ? getAgentName(session.currentAgent) : '未分配';
 
+    const escalatedHtml = session.escalated ? `
+        <div class="detail-section">
+            <div class="detail-section-title">
+                <i class="fas fa-user-shield"></i>
+                转人工
+            </div>
+            <div class="escalated-banner">
+                <i class="fas fa-shield-alt"></i>
+                <div>
+                    <div class="escalated-title">已转接人工客服</div>
+                    <div class="escalated-reason">${escapeHtml(session.escalation_reason || '自动转人工兜底')}</div>
+                    ${session.human_ticket_id ? `<div class="escalated-ticket">人工工单：${escapeHtml(session.human_ticket_id)}</div>` : ''}
+                </div>
+            </div>
+        </div>
+    ` : '';
+
     elements.detailContent.innerHTML = `
+        ${escalatedHtml}
         <div class="detail-section">
             <div class="detail-section-title">
                 <i class="fas fa-info-circle"></i>
@@ -838,11 +1054,15 @@ async function loadTickets() {
                     createdAt: ticket.timestamp,
                     currentAgent: ticket.agent_used,
                     confidence: ticket.confidence,
-                    actions: ticket.actions_taken || []
+                    actions: ticket.actions_taken || [],
+                    escalated: !!ticket.escalated,
+                    escalation_reason: ticket.escalated_reason || null,
+                    human_ticket_id: ticket.human_ticket_id || null
                 };
 
                 state.sessions.set(session.id, session);
                 updateTicketList(session);
+                if (state.currentSessionId === session.id) renderTicketDetail(session);
             });
         }
     } catch (error) {
@@ -864,6 +1084,9 @@ async function loadStats() {
         elements.totalTickets.textContent = data.total || 0;
         elements.successRate.textContent = `${Math.round(data.success_rate || 0)}%`;
         elements.avgTime.textContent = `${(data.avg_time || 0).toFixed(1)}s`;
+        if (elements.escalationCount) {
+            elements.escalationCount.textContent = data.escalations || 0;
+        }
 
         // 动画效果
         animateValue(elements.totalTickets, parseInt(elements.totalTickets.textContent));

@@ -1,0 +1,108 @@
+{"text": "我要退货", "expected": "refund", "note": "强关键词-退货"}
+{"text": "怎么申请退款", "expected": "refund", "note": "强关键词-退款"}
+{"text": "东西坏了能退吗", "expected": "refund", "note": "坏了+退 组合"}
+{"text": "收到的商品有质量问题，想退款", "expected": "refund", "note": "质量问题+退款"}
+{"text": "不想要了，申请退货", "expected": "refund", "note": "不想要了+退货"}
+{"text": "退款多久能到账", "expected": "refund", "note": "退款进度"}
+{"text": "买了两天想退掉", "expected": "refund", "note": "想退掉"}
+{"text": "这个能退换吗", "expected": "refund", "note": "退换"}
+{"text": "已退货，查一下退款进度", "expected": "refund", "note": "已退货+退款"}
+{"text": "你们的退货政策是什么", "expected": "refund", "note": "退货政策"}
+{"text": "收到的东西和描述完全不一样，我要退", "expected": "refund", "note": "LLM路径-无强关键词但退款意图"}
+{"text": "想取消这笔交易把钱拿回来", "expected": "refund", "note": "LLM路径-取消交易退钱"}
+{"text": "商品破损了，能退吗", "expected": "refund", "note": "破损"}
+{"text": "能换一个吗，这个有瑕疵", "expected": "refund", "note": "换一个+瑕疵"}
+{"text": "收到货发现坏了", "expected": "refund", "note": "坏了"}
+{"text": "我不想保留这个订单了，退了吧", "expected": "refund", "note": "退吧"}
+{"text": "价格贵了能退差价吗", "expected": "refund", "note": "退差价"}
+{"text": "申请换货怎么操作", "expected": "refund", "note": "换货"}
+{"text": "东西有毛病想退", "expected": "refund", "note": "有毛病+退"}
+{"text": "能不能退，我拆封了但不好用", "expected": "refund", "note": "能不能退"}
+{"text": "退款状态一直显示处理中", "expected": "refund", "note": "退款状态"}
+{"text": "怎么退钱到我的账户", "expected": "refund", "note": "退钱"}
+{"text": "我收到的货是坏的，要求退货退款", "expected": "refund", "note": "坏的+退货退款"}
+{"text": "买错了型号，想退掉重新买", "expected": "refund", "note": "想退掉"}
+{"text": "七天无理由退货怎么申请", "expected": "refund", "note": "退货流程"}
+{"text": "这个产品怎么用", "expected": "tech_support", "note": "强关键词-怎么用"}
+{"text": "蓝牙连不上怎么办", "expected": "tech_support", "note": "蓝牙+连不上"}
+{"text": "手机开不了机", "expected": "tech_support", "note": "开不了机"}
+{"text": "APP老是闪退", "expected": "tech_support", "note": "闪退"}
+{"text": "怎么设置这个功能", "expected": "tech_support", "note": "怎么设置"}
+{"text": "设备死机了", "expected": "tech_support", "note": "死机"}
+{"text": "WiFi连不上", "expected": "tech_support", "note": "WiFi+连不上"}
+{"text": "出错了，错误代码502", "expected": "tech_support", "note": "错误代码"}
+{"text": "软件怎么安装", "expected": "tech_support", "note": "怎么安装"}
+{"text": "这个产品的规格是多少", "expected": "tech_support", "note": "规格"}
+{"text": "保修期是多久", "expected": "tech_support", "note": "保修"}
+{"text": "屏幕一直转圈打不开", "expected": "tech_support", "note": "LLM路径-转圈故障"}
+{"text": "充不进电怎么回事", "expected": "tech_support", "note": "LLM路径-充电故障"}
+{"text": "声音很小听不清楚", "expected": "tech_support", "note": "LLM路径-声音异常"}
+{"text": "拍照很模糊", "expected": "tech_support", "note": "LLM路径-拍照故障"}
+{"text": "无法连接到网络", "expected": "tech_support", "note": "无法连接"}
+{"text": "怎么配置账户同步", "expected": "tech_support", "note": "怎么配置"}
+{"text": "产品报错说内存不足", "expected": "tech_support", "note": "报错"}
+{"text": "这个和我的系统兼容吗", "expected": "tech_support", "note": "兼容"}
+{"text": "坏了怎么修", "expected": "tech_support", "note": "坏了怎么修"}
+{"text": "使用说明书写的我看不懂", "expected": "tech_support", "note": "说明书"}
+{"text": "卡顿很严重", "expected": "tech_support", "note": "卡顿"}
+{"text": "设备连不上蓝牙音箱", "expected": "tech_support", "note": "蓝牙"}
+{"text": "怎么恢复出厂设置", "expected": "tech_support", "note": "怎么设置-引申"}
+{"text": "升级后一直闪退", "expected": "tech_support", "note": "闪退"}
+{"text": "我的订单到哪了", "expected": "order_query", "note": "强关键词-订单+到哪了"}
+{"text": "帮我查一下物流信息", "expected": "order_query", "note": "物流"}
+{"text": "什么时候发货", "expected": "order_query", "note": "发货"}
+{"text": "订单号查询一下", "expected": "order_query", "note": "订单号"}
+{"text": "怎么取消订单", "expected": "order_query", "note": "取消订单"}
+{"text": "修改收货地址", "expected": "order_query", "note": "修改地址"}
+{"text": "快递怎么还没到", "expected": "order_query", "note": "快递+还没到"}
+{"text": "配送进度到哪一步了", "expected": "order_query", "note": "配送进度"}
+{"text": "我买的东西怎么还没收到", "expected": "order_query", "note": "LLM路径-未收到货"}
+{"text": "发货了没有", "expected": "order_query", "note": "发货状态"}
+{"text": "用单号查一下物流", "expected": "order_query", "note": "单号"}
+{"text": "发货时间能提前吗", "expected": "order_query", "note": "发货"}
+{"text": "这个单子到哪了", "expected": "order_query", "note": "到哪了-口语"}
+{"text": "帮我看看订单详情", "expected": "order_query", "note": "订单详情"}
+{"text": "快递到哪个站点了", "expected": "order_query", "note": "快递"}
+{"text": "包裹什么时候送到", "expected": "order_query", "note": "配送"}
+{"text": "下单后多久能发货", "expected": "order_query", "note": "发货"}
+{"text": "能改一下收货人电话吗", "expected": "order_query", "note": "改地址-引申"}
+{"text": "我的包裹签收了吗", "expected": "order_query", "note": "快递"}
+{"text": "订单还在处理中是吗", "expected": "order_query", "note": "订单状态"}
+{"text": "物流停滞了两天", "expected": "order_query", "note": "物流"}
+{"text": "你们支持哪些支付方式", "expected": "general", "note": "LLM路径-支付方式"}
+{"text": "会员有什么权益", "expected": "general", "note": "LLM路径-会员权益"}
+{"text": "客服电话是多少", "expected": "general", "note": "LLM路径-联系方式"}
+{"text": "你们的营业时间", "expected": "general", "note": "LLM路径-营业时间"}
+{"text": "怎么联系人工客服", "expected": "general", "note": "LLM路径-转人工"}
+{"text": "优惠券怎么用", "expected": "general", "note": "LLM路径-优惠券"}
+{"text": "最近有什么优惠活动", "expected": "general", "note": "LLM路径-活动"}
+{"text": "发票怎么开", "expected": "general", "note": "LLM路径-发票"}
+{"text": "这个产品多少钱", "expected": "general", "note": "LLM路径-价格咨询"}
+{"text": "能开发票吗", "expected": "general", "note": "发票"}
+{"text": "有没有新用户福利", "expected": "general", "note": "会员-引申"}
+{"text": "你们公司在哪里", "expected": "general", "note": "LLM路径-公司信息"}
+{"text": "支持货到付款吗", "expected": "general", "note": "支付-引申"}
+{"text": "怎么注册账号", "expected": "general", "note": "LLM路径-注册"}
+{"text": "密码忘记了怎么办", "expected": "general", "note": "LLM路径-账户"}
+{"text": "能不能优先处理我的事", "expected": "general", "note": "LLM路径-模糊诉求"}
+{"text": "投诉渠道有哪些", "expected": "general", "note": "LLM路径-投诉"}
+{"text": "门店地址在哪", "expected": "general", "note": "LLM路径-门店"}
+{"text": "积分怎么兑换", "expected": "general", "note": "LLM路径-积分"}
+{"text": "你们有微信公众号吗", "expected": "general", "note": "LLM路径-渠道"}
+{"history": [{"role": "user", "content": "我要退货", "agent_used": "refund"}, {"role": "assistant", "content": "好的，请先描述问题", "agent_used": "refund"}], "text": "可以吗", "expected": "refund", "note": "多轮-退货流程短追问"}
+{"history": [{"role": "user", "content": "东西坏了能退吗", "agent_used": "refund"}, {"role": "assistant", "content": "可以，请提供订单号", "agent_used": "refund"}], "text": "坏了还能退吗", "expected": "refund", "note": "多轮-退货流程追问"}
+{"history": [{"role": "user", "content": "我要退货", "agent_used": "refund"}, {"role": "assistant", "content": "已为您登记", "agent_used": "refund"}], "text": "那退款呢", "expected": "refund", "note": "多轮-退货转退款"}
+{"history": [{"role": "user", "content": "蓝牙连不上", "agent_used": "tech_support"}, {"role": "assistant", "content": "请重试配对", "agent_used": "tech_support"}], "text": "还是连不上", "expected": "tech_support", "note": "多轮-技术支持流程追问"}
+{"history": [{"role": "user", "content": "怎么设置", "agent_used": "tech_support"}, {"role": "assistant", "content": "进入设置页", "agent_used": "tech_support"}], "text": "找不到这个选项", "expected": "tech_support", "note": "多轮-技术支持追问"}
+{"history": [{"role": "user", "content": "开不了机", "agent_used": "tech_support"}, {"role": "assistant", "content": "请充电后再试", "agent_used": "tech_support"}], "text": "充了还是不行", "expected": "tech_support", "note": "多轮-技术追问"}
+{"history": [{"role": "user", "content": "订单到哪了", "agent_used": "order_query"}, {"role": "assistant", "content": "正在派送", "agent_used": "order_query"}], "text": "到哪了", "expected": "order_query", "note": "多轮-订单流程短追问"}
+{"history": [{"role": "user", "content": "什么时候发货", "agent_used": "order_query"}, {"role": "assistant", "content": "今天发出", "agent_used": "order_query"}], "text": "能查到单号吗", "expected": "order_query", "note": "多轮-订单追问"}
+{"history": [{"role": "user", "content": "怎么申请退款", "agent_used": "refund"}, {"role": "assistant", "content": "填写退款单", "agent_used": "refund"}], "text": "提交后多久到账", "expected": "refund", "note": "多轮-退款进度追问"}
+{"history": [{"role": "user", "content": "WiFi连不上", "agent_used": "tech_support"}, {"role": "assistant", "content": "重启路由器", "agent_used": "tech_support"}], "text": "试过了没用", "expected": "tech_support", "note": "多轮-技术追问"}
+{"history": [{"role": "user", "content": "我的订单到哪了", "agent_used": "order_query"}, {"role": "assistant", "content": "已揽收", "agent_used": "order_query"}], "text": "怎么改地址", "expected": "order_query", "note": "多轮-订单改地址"}
+{"history": [{"role": "user", "content": "我要退货", "agent_used": "refund"}, {"role": "assistant", "content": "请寄回商品", "agent_used": "refund"}], "text": "运费谁出", "expected": "refund", "note": "多轮-退货运费追问"}
+{"history": [{"role": "user", "content": "怎么用这个产品", "agent_used": "tech_support"}, {"role": "assistant", "content": "长按开机键", "agent_used": "tech_support"}], "text": "还是不会", "expected": "tech_support", "note": "多轮-技术追问"}
+{"history": [{"role": "user", "content": "什么时候发货", "agent_used": "order_query"}, {"role": "assistant", "content": "48小时内", "agent_used": "order_query"}], "text": "能加急吗", "expected": "order_query", "note": "多轮-订单加急"}
+{"history": [{"role": "user", "content": "怎么申请退款", "agent_used": "refund"}, {"role": "assistant", "content": "已受理", "agent_used": "refund"}], "text": "钱退哪了", "expected": "refund", "note": "多轮-退款去向"}
+{"history": [{"role": "user", "content": "WiFi连不上", "agent_used": "tech_support"}, {"role": "assistant", "content": "检查密码", "agent_used": "tech_support"}], "text": "密码对的", "expected": "tech_support", "note": "多轮-技术追问"}
+{"text": "蓝牙连接不上怎么办？", "expected": "tech_support", "note": "用户截图反馈的精确表述-蓝牙关键词"}

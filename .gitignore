@@ -16,6 +16,13 @@ __pycache__/
 # Uploads
 uploads/
 
+# Runtime data (SQLite + FAISS index)，生产用 Docker 卷持久化，不入库
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/faq_index*
+data/__pycache__/
+
 # Virtual environment
 venv/
 env/
@@ -24,3 +31,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# WorkBuddy internal data (project memory / logs) — not part of the deliverable
+.workbuddy/

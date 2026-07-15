@@ -17,20 +17,19 @@ from pydantic import BaseModel
 
 from backend.models import TicketRequest, TicketResponse, AgentType
 from backend.tools import escalate_to_human, query_order_status
+from backend.db.repository import get_ticket_repo, get_stats_repo
+from backend.config import ESCALATION_CONFIDENCE, RAG_CONF_HIGH
+from backend.tracing import RequestTrace, trace_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-ticket_history = []
+# 上传 FAQ 的事件日志（轻量、非核心，保留内存即可）
 faq_upload_history = []
-_stats_lock = asyncio.Lock()
-stats_data = {
-    "total_requests": 0,
-    "success_requests": 0,
-    "total_time": 0.0,
-    "agent_stats": {"router": 0, "refund": 0, "tech_support": 0, "order_query": 0, "general": 0}
-}
+
+# 串行化 FAQ 索引重建（add_faqs_batch 会全量重建 FAISS，避免并发竞态）
+_upload_lock = asyncio.Lock()
 
 
 def _get_memory(app_state: Any):
@@ -60,7 +59,7 @@ async def _stream_llm_fallback(llm, user_message: str, conversation_history: lis
             if role in ("user", "assistant"):
                 messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_message})
-    for chunk in llm.stream(messages):
+    async for chunk in llm.astream(messages):
         yield chunk
 
 
@@ -73,12 +72,14 @@ BUSINESS_KEYWORDS = [
 
 async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncGenerator[str, None]:
     start_time = time.time()
+    request_id = str(uuid.uuid4())
+    trace = RequestTrace(request_id, request.session_id, request.user_id, request.user_message)
     memory = _get_memory(app_state)
 
     try:
         conversation_history = await memory.get_conversation_history(request.session_id, limit=10)
 
-        # ========== 0. 纯数字检测 ==========
+        # ========== 0. 纯数字检测（视为订单号查询）==========
         if re.search(r'^\d{2,}$', request.user_message.strip()):
             order_id = request.user_message.strip()
 
@@ -88,35 +89,40 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
                 recent_text = " ".join([m.get("content", "") for m in conversation_history[-6:]])
                 history_is_refund = any(kw in recent_text for kw in ["退货", "退款", "退钱"])
 
+            await memory.save_message(request.session_id, "user", request.user_message)
+
             if history_is_refund:
                 # 退款流程中 → 走退货Agent
-                agent = app_state.refund_agent
-                await memory.save_message(request.session_id, "user", request.user_message)
-                refund_result = await agent.execute_with_memory(order_id, request.session_id, memory)
-                reply = refund_result.get("reply", f"订单{order_id}查询失败")
-                for i in range(0, len(reply), 5):
-                    yield f"data: {json.dumps({'type': 'token', 'token': reply[i:i+5]}, ensure_ascii=False)}\n\n"
+                reply = ""
+                async for chunk in app_state.refund_agent.stream_with_memory(
+                    order_id, request.session_id, memory
+                ):
+                    reply += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'token': chunk}, ensure_ascii=False)}\n\n"
+                if not reply.strip():
+                    reply = f"订单{order_id}查询失败"
+                    yield f"data: {json.dumps({'type': 'token', 'token': reply}, ensure_ascii=False)}\n\n"
                 await memory.save_message(request.session_id, "assistant", reply)
-                async with _stats_lock:
-                    stats_data["total_requests"] += 1
-                    stats_data["agent_stats"]["refund"] += 1
+                try:
+                    get_stats_repo().increment_daily("refund", time.time() - start_time, success=True)
+                except Exception as e:
+                    logger.error("统计落库失败: %s", e)
                 yield f"data: {json.dumps({'type': 'done', 'done': True}, ensure_ascii=False)}\n\n"
                 return
 
-            # 不在退款流程 → 直接查订单
+            # 不在退款流程 → 直接查订单（确定性短文本，逐字吐出）
             try:
-                order_result = query_order_status.invoke({"order_id": order_id})
+                order_result = await asyncio.to_thread(query_order_status.invoke, {"order_id": order_id})
                 reply = f"订单{order_id}：{order_result.get('status', '未知')}，金额{order_result.get('amount', '?')}元"
             except Exception:
                 reply = f"订单{order_id}查询失败，请稍后重试"
-
-            await memory.save_message(request.session_id, "user", request.user_message)
             for i in range(0, len(reply), 5):
                 yield f"data: {json.dumps({'type': 'token', 'token': reply[i:i+5]}, ensure_ascii=False)}\n\n"
             await memory.save_message(request.session_id, "assistant", reply)
-            async with _stats_lock:
-                stats_data["total_requests"] += 1
-                stats_data["agent_stats"]["order_query"] += 1
+            try:
+                get_stats_repo().increment_daily("order_query", time.time() - start_time, success=True)
+            except Exception as e:
+                logger.error("统计落库失败: %s", e)
             yield f"data: {json.dumps({'type': 'done', 'done': True}, ensure_ascii=False)}\n\n"
             return
 
@@ -148,17 +154,21 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
 
         force_refund = current_is_refund and history_is_refund
 
+        route_reason = None
         if force_refund or is_short_in_refund_context:
             agent_type = AgentType.REFUND
             confidence = 0.92
+            route_reason = "退款上下文保持退款流程"
         else:
-            route_result = router_agent.route(
+            route_result = await router_agent.aroute(
                 request.user_message,
                 session_id=request.session_id,
                 conversation_history=conversation_history
             )
             agent_type = route_result["agent_type"]
             confidence = route_result["confidence"]
+            route_reason = route_result.get("reason")
+        trace.add_event("routing", agent=agent_type.value, confidence=confidence, reason=route_reason)
 
         # ========== 2. 业务相关性检测（非退款上下文且无业务关键词 → LLM 兜底）==========
         is_business_related = any(kw in request.user_message for kw in BUSINESS_KEYWORDS)
@@ -170,9 +180,10 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
                 full_response += chunk
                 yield f"data: {json.dumps({'type': 'token', 'token': chunk}, ensure_ascii=False)}\n\n"
             await memory.save_message(request.session_id, "assistant", full_response)
-            async with _stats_lock:
-                stats_data["total_requests"] += 1
-                stats_data["agent_stats"]["general"] += 1
+            try:
+                get_stats_repo().increment_daily("general", time.time() - start_time, success=True)
+            except Exception as e:
+                logger.error("统计落库失败: %s", e)
             yield f"data: {json.dumps({'type': 'done', 'done': True}, ensure_ascii=False)}\n\n"
             return
 
@@ -182,6 +193,9 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
         agent = None
         actions_taken = []
         precomputed_reply = None
+        escalate = False
+        escalation_reason = None
+        escalation_priority = "normal"
 
         if agent_type == AgentType.REFUND:
             agent = app_state.refund_agent
@@ -190,11 +204,26 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
         elif agent_type == AgentType.TECH_SUPPORT:
             agent = app_state.tech_agent
             actions_taken.append("路由到技术支持专家")
+            tech_conf = None
             if app_state.faq_processor:
-                faq_results = app_state.faq_processor.search(request.user_message, k=2)
-                if faq_results and faq_results[0].get("score", 0) > 0.75:
-                    precomputed_reply = faq_results[0]["answer"]
-                    actions_taken.append("FAQ检索命中")
+                retriever = getattr(app_state, "hybrid_retriever", None) or app_state.faq_processor
+                faq_results = await asyncio.to_thread(retriever.search, request.user_message, 2)
+                if faq_results:
+                    top = faq_results[0]
+                    tech_conf = top.get("confidence", top.get("score", 0))
+                    trace.add_event("retrieval", top_confidence=round(tech_conf, 3),
+                                    sources=[r.get("question") for r in faq_results[:2]])
+                    if tech_conf < ESCALATION_CONFIDENCE:
+                        # 低置信 → 转人工兜底（防幻觉 / 安全兜底）
+                        escalate = True
+                        escalation_reason = (
+                            f"RAG检索置信度过低（{tech_conf:.2f} < {ESCALATION_CONFIDENCE}），"
+                            f"自动转人工"
+                        )
+                        escalation_priority = "high" if tech_conf < 0.15 else "normal"
+                    elif tech_conf >= RAG_CONF_HIGH:
+                        precomputed_reply = top["answer"]
+                        actions_taken.append("FAQ检索命中")
         elif agent_type == AgentType.ORDER_QUERY:
             agent = app_state.order_agent
             actions_taken.append("路由到订单查询专员")
@@ -211,7 +240,7 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
                             break
             if order_id:
                 try:
-                    order_result = query_order_status.invoke({"order_id": order_id})
+                    order_result = await asyncio.to_thread(query_order_status.invoke, {"order_id": order_id})
                     precomputed_reply = f"订单{order_id}当前状态：{order_result.get('status', '未知')}"
                     actions_taken.append(f"查询订单{order_id}")
                     await memory.set_order_info(request.session_id, order_id, order_result)
@@ -223,77 +252,89 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
 
         await memory.save_message(request.session_id, "user", request.user_message)
 
-        # ========== 4. 执行 Agent ==========
+        # ========== 3.5 低置信转人工（Agent 执行前短路） ==========
+        if escalate:
+            async for chunk in _stream_escalation(
+                trace, escalation_reason, escalation_priority,
+                request, memory, start_time, agent_type, confidence, actions_taken
+            ):
+                yield chunk
+            return
+
+        # ========== 4. 执行 Agent（真·异步流式） ==========
         full_response = ""
-        agent_reply = ""
-
-        if precomputed_reply:
-            agent_reply = precomputed_reply
-        elif agent_type == AgentType.REFUND:
-            refund_result = await agent.execute_with_memory(
-                request.user_message, request.session_id, memory
-            )
-            is_rule_handled = refund_result.get("handled") is True or bool(refund_result.get("actions"))
-            if is_rule_handled:
-                agent_reply = refund_result.get("reply", "") or ""
+        with trace.span("agent_exec", agent=agent_type.value) as span:
+            if agent_type == AgentType.REFUND:
+                # 退款 Agent：规则化为主，失败回退 LLM 真流式
+                async for chunk in agent.stream_with_memory(request.user_message, request.session_id, memory):
+                    full_response += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'token': chunk}, ensure_ascii=False)}\n\n"
+            elif precomputed_reply:
+                # 检索/规则命中的确定性短文本，逐字吐出（无需调 LLM）
+                for i in range(0, len(precomputed_reply), 5):
+                    piece = precomputed_reply[i:i + 5]
+                    full_response += piece
+                    yield f"data: {json.dumps({'type': 'token', 'token': piece}, ensure_ascii=False)}\n\n"
             else:
-                messages = [{"role": "user", "content": request.user_message}]
-                base_result = agent.execute(messages)
-                agent_reply = base_result.get("reply", "") or ""
-        else:
-            context_messages = []
-            recent_history = conversation_history[-6:]
-            for h in recent_history:
-                role = h.get("role", "user")
-                content = h.get("content", "")
-                if role in ("user", "assistant"):
-                    context_messages.append({"role": role, "content": content})
-            context_messages.append({"role": "user", "content": request.user_message})
-            base_result = agent.execute(context_messages)
-            agent_reply = base_result.get("reply", "") or ""
+                context_messages = []
+                recent_history = conversation_history[-6:]
+                for h in recent_history:
+                    role = h.get("role", "user")
+                    content = h.get("content", "")
+                    if role in ("user", "assistant"):
+                        context_messages.append({"role": role, "content": content})
+                context_messages.append({"role": "user", "content": request.user_message})
+                # 其他 Agent：ReAct 循环 + LLM 真流式输出
+                async for chunk in agent.astream(context_messages):
+                    full_response += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'token': chunk}, ensure_ascii=False)}\n\n"
 
-        # ========== 5. 流式输出 ==========
-        if _is_fallback_reply(agent_reply):
-            async for chunk in _stream_llm_fallback(app_state.llm, request.user_message, conversation_history):
-                full_response += chunk
-                yield f"data: {json.dumps({'type': 'token', 'token': chunk}, ensure_ascii=False)}\n\n"
-        else:
-            full_response = agent_reply
-            chunk_size = max(1, len(agent_reply) // 10) or 1
-            for i in range(0, len(agent_reply), chunk_size):
-                yield f"data: {json.dumps({'type': 'token', 'token': agent_reply[i:i + chunk_size]}, ensure_ascii=False)}\n\n"
+            if not full_response.strip():
+                fallback_msg = "抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。"
+                full_response = fallback_msg
+                yield f"data: {json.dumps({'type': 'token', 'token': fallback_msg}, ensure_ascii=False)}\n\n"
+            span.close(tokens=len(full_response))
 
-        if not full_response.strip():
-            fallback_msg = "抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。"
-            full_response = fallback_msg
-            yield f"data: {json.dumps({'type': 'token', 'token': fallback_msg}, ensure_ascii=False)}\n\n"
+        # ========== 5. 兜底话术转人工（安全兜底） ==========
+        # 非通用 Agent 的最终回复仍是兜底话术 → 自动转人工，避免把"建议联系人工"直接甩给用户
+        if not escalate and _is_fallback_reply(full_response) and agent_type != AgentType.GENERAL:
+            async for chunk in _stream_escalation(
+                trace, "机器人回复为兜底话术，自动转人工", "normal",
+                request, memory, start_time, agent_type, confidence, actions_taken
+            ):
+                yield chunk
+            return
 
-        # ========== 6. 统计 & 工单 ==========
-        async with _stats_lock:
-            stats_data["total_requests"] += 1
-            stats_data["success_requests"] += 1
-            stats_data["total_time"] += (time.time() - start_time)
-            stats_data["agent_stats"][agent_type.value] += 1
-
-        ticket = {
-            "ticket_id": str(uuid.uuid4()),
+        # ========== 6. 统计 & 工单落库 ==========
+        ticket_id = str(uuid.uuid4())
+        duration = time.time() - start_time
+        ticket_row = {
+            "ticket_id": ticket_id,
             "session_id": request.session_id,
             "user_id": request.user_id,
             "user_message": request.user_message,
             "response": full_response,
             "agent_used": agent_type.value,
             "confidence": confidence,
-            "actions_taken": actions_taken,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "duration": time.time() - start_time
+            "actions_taken": json.dumps(actions_taken, ensure_ascii=False),
+            "duration": duration,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "escalated": 0,
+            "escalated_reason": None,
+            "priority": None,
+            "human_ticket_id": None,
         }
-        ticket_history.append(ticket)
+        try:
+            get_ticket_repo().create(ticket_row)
+            get_stats_repo().increment_daily(agent_type.value, duration, success=True)
+        except Exception as e:
+            logger.error("工单/统计落库失败: %s", e)
 
         await memory.save_message(request.session_id, "assistant", full_response, {
             "agent_used": agent_type.value, "confidence": confidence
         })
 
-        yield f"data: {json.dumps({'type': 'done', 'done': True, 'ticket_id': ticket['ticket_id']}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'done': True, 'ticket_id': ticket_id}, ensure_ascii=False)}\n\n"
 
     except Exception as e:
         logger.error(
@@ -303,8 +344,85 @@ async def stream_chat_response(request: TicketRequest, app_state: Any) -> AsyncG
         )
         fallback_msg = "抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。"
         yield f"data: {json.dumps({'type': 'token', 'token': fallback_msg}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+        # 仅在日志中保留完整异常（已在上方 logger.error 记录 exc_info），
+        # 面向前端只返回安全提示，避免泄露内部实现细节 / 密钥痕迹
+        yield f"data: {json.dumps({'type': 'error', 'error': '系统处理异常，请稍后重试或转接人工客服'}, ensure_ascii=False)}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'done': True}, ensure_ascii=False)}\n\n"
+
+    finally:
+        # 链路追踪：无论正常结束还是异常，均落盘并输出结构化日志
+        try:
+            trace.log()
+            trace_store.push(trace)
+        except Exception:
+            pass
+
+
+async def _stream_escalation(trace: RequestTrace, reason: str, priority: str,
+                             request: TicketRequest, memory, start_time: float,
+                             agent_type, confidence: float, actions_taken: list) -> AsyncGenerator[str, None]:
+    """转人工兜底：调用 escalate_to_human 工具，发出 escalation 事件并流式播报，落库工单。"""
+    trace.escalated = True
+    trace.escalation_reason = reason
+    trace.add_event("escalation", reason=reason, priority=priority)
+
+    # 调用转人工工具（同步工具，置于线程池避免阻塞事件循环）
+    try:
+        esc = await asyncio.to_thread(
+            escalate_to_human.invoke, {"reason": reason, "priority": priority}
+        )
+    except Exception as e:
+        logger.error("转人工工具调用失败: %s", e)
+        esc = {
+            "ticket_id": f"TKT-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "message": "已为您转接人工客服，请稍候。",
+            "estimated_response_time": "尽快",
+        }
+
+    human_ticket_id = esc.get("ticket_id")
+    human_msg = esc.get("message", "已为您转接人工客服，请稍候。")
+
+    # 发出转人工事件（前端据此展示转人工卡片）
+    yield f"data: {json.dumps({'type': 'escalation', 'reason': reason,
+                                'priority': priority, 'human_ticket_id': human_ticket_id,
+                                'estimated_response_time': esc.get('estimated_response_time')},
+                               ensure_ascii=False)}\n\n"
+
+    # 流式播报转人工文案
+    for i in range(0, len(human_msg), 5):
+        piece = human_msg[i:i + 5]
+        yield f"data: {json.dumps({'type': 'token', 'token': piece}, ensure_ascii=False)}\n\n"
+
+    duration = time.time() - start_time
+    ticket_id = str(uuid.uuid4())
+    ticket_row = {
+        "ticket_id": ticket_id,
+        "session_id": request.session_id,
+        "user_id": request.user_id,
+        "user_message": request.user_message,
+        "response": human_msg,
+        "agent_used": "human",
+        "confidence": confidence,
+        "actions_taken": json.dumps(actions_taken + ["转人工"], ensure_ascii=False),
+        "duration": duration,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "escalated": 1,
+        "escalated_reason": reason,
+        "priority": priority,
+        "human_ticket_id": human_ticket_id,
+    }
+    try:
+        get_ticket_repo().create(ticket_row)
+        get_stats_repo().increment_daily("human", duration, success=True, escalations=1)
+    except Exception as e:
+        logger.error("转人工工单落库失败: %s", e)
+
+    await memory.save_message(request.session_id, "assistant", human_msg,
+                               {"agent_used": "human", "escalated": True})
+
+    yield f"data: {json.dumps({'type': 'done', 'done': True, 'ticket_id': ticket_id,
+                                'escalated': True, 'escalated_reason': reason},
+                               ensure_ascii=False)}\n\n"
 
 
 @router.post("/api/chat")
@@ -319,26 +437,37 @@ async def chat(request: TicketRequest, req: Request):
 
 @router.get("/api/tickets")
 async def get_tickets(limit: int = 10, offset: int = 0, agent_type: str = None, user_id: str = None):
-    filtered = ticket_history
-    if agent_type: filtered = [t for t in filtered if t.get("agent_used") == agent_type]
-    if user_id: filtered = [t for t in filtered if t.get("user_id") == user_id]
-    filtered.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
-    return JSONResponse({"total": len(filtered), "limit": limit, "offset": offset, "tickets": filtered[offset:offset + limit]})
+    repo = get_ticket_repo()
+    total = repo.count(agent_type=agent_type, user_id=user_id)
+    tickets = repo.list(limit=limit, offset=offset, agent_type=agent_type, user_id=user_id)
+    # actions_taken 在库中以 JSON 字符串存储，返回前端前反序列化为列表
+    for t in tickets:
+        try:
+            t["actions_taken"] = json.loads(t.get("actions_taken") or "[]")
+        except Exception:
+            t["actions_taken"] = []
+    return JSONResponse({"total": total, "limit": limit, "offset": offset, "tickets": tickets})
 
 
 @router.get("/api/stats")
 async def get_stats():
-    total = stats_data["total_requests"]
-    success = stats_data["success_requests"]
-    total_time = stats_data["total_time"]
-    return JSONResponse({"total": total, "success": success, "success_rate": round((success / total * 100) if total > 0 else 0, 1), "avg_time": round((total_time / total) if total > 0 else 0, 2), "agent_stats": stats_data["agent_stats"], "faq_stats": {"total_faqs": 0, "uploads": len(faq_upload_history)}})
+    summary = get_stats_repo().get_summary()
+    summary["faq_stats"] = {"total_faqs": 0, "uploads": len(faq_upload_history)}
+    return JSONResponse(summary)
+
+
+@router.get("/api/traces")
+async def get_traces(limit: int = 50, escalated_only: bool = False):
+    """链路追踪查询：返回最近请求链路（含路由/检索/Agent/转人工 span）。"""
+    items = trace_store.recent(n=limit, escalated_only=escalated_only)
+    return JSONResponse({"total": len(items), "traces": items})
 
 
 @router.get("/api/health")
 async def health_check(req: Request):
     import datetime as dt
     app_state = req.app.state
-    checks = {"llm": hasattr(app_state, "llm") and app_state.llm is not None, "router_agent": hasattr(app_state, "router_agent") and app_state.router_agent is not None, "refund_agent": hasattr(app_state, "refund_agent") and app_state.refund_agent is not None, "tech_agent": hasattr(app_state, "tech_agent") and app_state.tech_agent is not None, "order_agent": hasattr(app_state, "order_agent") and app_state.order_agent is not None, "faq_processor": hasattr(app_state, "faq_processor") and app_state.faq_processor is not None}
+    checks = {"llm": hasattr(app_state, "llm") and app_state.llm is not None, "router_agent": hasattr(app_state, "router_agent") and app_state.router_agent is not None, "refund_agent": hasattr(app_state, "refund_agent") and app_state.refund_agent is not None, "tech_agent": hasattr(app_state, "tech_agent") and app_state.tech_agent is not None, "order_agent": hasattr(app_state, "order_agent") and app_state.order_agent is not None, "faq_processor": hasattr(app_state, "faq_processor") and app_state.faq_processor is not None, "db": hasattr(app_state, "db") and app_state.db is not None}
     return JSONResponse({"status": "healthy" if all(checks.values()) else "degraded", "timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "checks": checks, "version": "1.0.0"})
 
 
@@ -360,8 +489,17 @@ async def upload_faq(file: UploadFile, req: Request):
                 if len(parts) >= 2: faq_items.append({"question": parts[0].strip(), "answer": parts[1].strip(), "category": "上传"})
         if not isinstance(faq_items, list): raise HTTPException(status_code=400, detail="FAQ 数据格式错误")
         valid_items = [item for item in faq_items if isinstance(item, dict) and "question" in item and "answer" in item]
-        added = faq_processor.add_faqs_batch(valid_items) if valid_items else 0
+        retriever = getattr(app_state, "hybrid_retriever", None)
+        # 向量化 + 全量重建 FAISS 是网络调用，放入线程池避免阻塞事件循环；
+        # 加锁串行化，避免并发上传同时重建索引导致竞态。
+        async with _upload_lock:
+            if retriever is not None:
+                added = await asyncio.to_thread(retriever.add_faqs_batch, valid_items) if valid_items else 0
+                faq_stats = retriever.get_stats()
+            else:
+                added = await asyncio.to_thread(faq_processor.add_faqs_batch, valid_items) if valid_items else 0
+                faq_stats = faq_processor.get_stats()
         faq_upload_history.append({"filename": file.filename, "total_items": len(faq_items), "added": added, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-        return JSONResponse({"success": True, "message": f"成功添加 {added}/{len(faq_items)} 条 FAQ", "added": added, "total_in_file": len(faq_items), "faq_stats": faq_processor.get_stats()})
+        return JSONResponse({"success": True, "message": f"成功添加 {added}/{len(faq_items)} 条 FAQ", "added": added, "total_in_file": len(faq_items), "faq_stats": faq_stats})
     except HTTPException: raise
     except Exception as e: raise HTTPException(status_code=500, detail=f"处理 FAQ 文件失败：{str(e)}")

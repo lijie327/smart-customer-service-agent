@@ -193,9 +193,10 @@ class RefundAgent(BaseAgent):
                 "handled": True
             }
 
-        # ========== 7. 其他情况 → 回退到 LLM ==========
-        messages = [{"role": "user", "content": user_message}]
-        return self.execute(messages)
+        # ========== 7. 其他情况 → 交由异步流式（astream）处理 ==========
+        # 不再同步调用阻塞式 self.execute（会阻塞事件循环），
+        # 返回“未处理”标记，由 stream_with_memory 走 astream 真流式。
+        return {"handled": False, "reply": ""}
 
     # ==================== 流式输出包装 ====================
 
@@ -215,5 +216,5 @@ class RefundAgent(BaseAgent):
                 yield reply[i:i + chunk_size]
         else:
             messages = [{"role": "user", "content": user_message}]
-            for chunk in self.stream_with_tool_handling(messages):
+            async for chunk in self.astream(messages):
                 yield chunk

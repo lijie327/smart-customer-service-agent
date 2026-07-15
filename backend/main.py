@@ -84,11 +84,18 @@ async def lifespan(app: FastAPI):
         logger.info("构建FAQ知识库...")
         faq_processor = FAQProcessor(
             embeddings=embeddings,
-            index_path="./data/faq_index"
+            index_path=config.FAQ_INDEX_PATH
         )
         app.state.faq_processor = faq_processor
         faq_stats = faq_processor.get_stats()
         logger.info(f"✓ FAQ知识库构建完成，共 {faq_stats['total_faqs']} 条FAQ")
+
+        # 3.1 统一混合检索器（向量 + BM25 + RRF），供 TechAgent / 工具 / API 共用
+        from backend.rag_retriever import HybridFAQRetriever, set_default_retriever
+        hybrid_retriever = HybridFAQRetriever(faq_processor)
+        app.state.hybrid_retriever = hybrid_retriever
+        set_default_retriever(hybrid_retriever)
+        logger.info("✓ 统一混合检索器(HybridFAQRetriever)初始化完成")
 
         # 4. 初始化对话记忆 (Redis)
         logger.info("初始化ConversationMemory (Redis)...")
@@ -110,6 +117,18 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("⚠ Redis 不可用，ConversationMemory 使用内存缓存")
 
+        # 4.5 初始化数据层 (SQLite) + 自动灌入合成数据
+        logger.info("初始化数据层 (SQLite)...")
+        from backend.db.repository import init_database
+        from backend.db.seed import run_seed
+        db = init_database(config.DB_PATH)
+        seeded = run_seed(db, count=800)
+        if seeded:
+            logger.info(f"✓ 数据层就绪，已灌入 {seeded} 条合成订单")
+        else:
+            logger.info("✓ 数据层就绪（订单数据已存在，跳过 seed）")
+        app.state.db = db
+
         # 5. 初始化Router Agent
         logger.info("初始化RouterAgent...")
         router_agent = RouterAgent(llm)
@@ -125,7 +144,7 @@ async def lifespan(app: FastAPI):
         logger.info("✓ RefundAgent初始化完成")
 
         # 技术支持Agent
-        tech_agent = TechAgent(llm, faq_processor)
+        tech_agent = TechAgent(llm, faq_processor, retriever=hybrid_retriever)
         app.state.tech_agent = tech_agent
         logger.info("✓ TechAgent初始化完成")
 
@@ -182,11 +201,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 配置CORS
+# 配置CORS（来源可通过环境变量 ALLOWED_ORIGINS 收口，生产建议限制具体域名）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应该限制具体的域名
-    allow_credentials=True,
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_credentials=config.ALLOW_CREDENTIALS and config.ALLOWED_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -266,6 +285,6 @@ if __name__ == "__main__":
         "backend.main:app",
         host=config.HOST,
         port=config.PORT,
-        reload=True,  # 开发环境启用热重载
+        reload=False,  # 生产/容器环境关闭热重载；本地开发可改为 True 或用 uvicorn --reload
         log_level="info"
     )

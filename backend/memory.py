@@ -206,8 +206,9 @@ class ConversationMemory:
                 if self._client is None:
                     return self._get_cache_messages(session_id, limit)
                 key = f"{self._get_session_key(session_id)}:messages"
-                raw_messages = await self._client.lrange(key, 0, limit * 2)
-                for msg_json in reversed(raw_messages[:limit]):
+                # 取最近 limit 条，按时间正序返回（与内存回退路径 _get_cache_messages 的 [-limit:] 一致）
+                raw_messages = await self._client.lrange(key, -limit, -1)
+                for msg_json in raw_messages:
                     try:
                         messages.append(json.loads(msg_json))
                     except json.JSONDecodeError:

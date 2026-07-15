@@ -1,0 +1,65 @@
+{
+  "backend": "FakeLLM(offline)",
+  "total": 108,
+  "correct": 108,
+  "accuracy": 1.0,
+  "macro_precision": 1.0,
+  "macro_recall": 1.0,
+  "macro_f1": 1.0,
+  "fast_path_ratio": 0.5833,
+  "fast_path_count": 63,
+  "llm_path_count": 45,
+  "per_class": {
+    "refund": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 31
+    },
+    "tech_support": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 32
+    },
+    "order_query": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 25
+    },
+    "general": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 20
+    }
+  },
+  "confusion_matrix": {
+    "refund": {
+      "refund": 31,
+      "tech_support": 0,
+      "order_query": 0,
+      "general": 0
+    },
+    "tech_support": {
+      "refund": 0,
+      "tech_support": 32,
+      "order_query": 0,
+      "general": 0
+    },
+    "order_query": {
+      "refund": 0,
+      "tech_support": 0,
+      "order_query": 25,
+      "general": 0
+    },
+    "general": {
+      "refund": 0,
+      "tech_support": 0,
+      "order_query": 0,
+      "general": 20
+    }
+  },
+  "errors": []
+}

@@ -39,15 +39,15 @@ class RouterAgent:
     # 关键词路由映射（无需 LLM 即可判断的强信号关键词）
     KEYWORD_ROUTES = {
         AgentType.REFUND: [
-            "退货", "退款", "退钱", "退差价", "退换", "退吧", "想退",
-            "坏了", "质量问题", "有毛病", "瑕疵", "破损", "坏了怎么退",
+            "退货", "退款", "退钱", "退差价", "退换", "退吧", "退了", "想退",
+            "质量问题", "有毛病", "瑕疵", "破损",
             "换货", "换一个", "退款流程", "退货流程", "退货政策",
             "怎么退款", "怎么退货", "申请退款", "申请退货",
             "不想要了", "想退掉", "能不能退", "退款到账",
             "已退货", "退款进度", "退款状态",
         ],
         AgentType.TECH_SUPPORT: [
-            "怎么用", "使用方法", "说明书", "不会用", "怎么设置",
+            "使用方法", "说明书", "不会用", "怎么设置",
             "开不了机", "不开机", "死机", "卡顿", "闪退",
             "连不上", "蓝牙", "WiFi", "网络", "无法连接",
             "怎么安装", "怎么配置", "规格", "参数", "兼容",
@@ -56,9 +56,10 @@ class RouterAgent:
         ],
         AgentType.ORDER_QUERY: [
             "订单", "物流", "快递", "发货", "配送",
-            "到哪了", "还没到", "什么时候到", "多久到",
+            "到哪了", "还没到", "什么时候到",
             "查询", "配送进度", "订单号",
             "修改地址", "改地址", "取消订单",
+            "收货地址", "收货人",
         ],
     }
 
@@ -99,6 +100,7 @@ class RouterAgent:
         history_context = ""
         recent_refund_count = 0
         recent_tech_count = 0
+        recent_order_count = 0
 
         if conversation_history:
             # 分析最近几轮对话，统计各种意图的次数
@@ -108,6 +110,8 @@ class RouterAgent:
                         recent_refund_count += 1
                     elif msg.get("agent_used") == "tech_support":
                         recent_tech_count += 1
+                    elif msg.get("agent_used") == "order_query":
+                        recent_order_count += 1
 
             # 如果有历史对话，添加到提示中
             history_str = "\n".join([
@@ -162,6 +166,11 @@ class RouterAgent:
                     agent_type = AgentType.TECH_SUPPORT
                     confidence = 0.85
                     reason = f"上下文检测：前 {recent_tech_count} 轮在技术支持流程中，当前为简短消息 '{message}'，保持技术支持"
+                # 订单流程中的简短追问，保持订单查询（与退款/技术对称）
+                elif recent_order_count >= 1 and len(message) < 20:
+                    agent_type = AgentType.ORDER_QUERY
+                    confidence = 0.88
+                    reason = f"上下文检测：前 {recent_order_count} 轮在订单流程中，当前为简短消息 '{message}'，保持订单查询"
 
                 return agent_type, confidence, reason
             else:
@@ -186,6 +195,94 @@ class RouterAgent:
         """
         agent_type, confidence, reason = self.classify_intent(message, conversation_history)
 
+        return {
+            "agent_type": agent_type,
+            "confidence": confidence,
+            "reason": reason,
+            "message": message
+        }
+
+    async def aclassify_intent(self, message: str, conversation_history: List[Dict] = None) -> Tuple[AgentType, float, str]:
+        """
+        异步意图分类（与 classify_intent 逻辑一致，但 LLM 调用走 `await ainvoke`）。
+
+        在 FastAPI 的 async 端点中，同步 llm.invoke 会阻塞事件循环；
+        此处改用 ainvoke 保证非阻塞。
+        """
+        keyword_result = self._keyword_precheck(message)
+        if keyword_result is not None:
+            return keyword_result
+
+        history_context = ""
+        recent_refund_count = 0
+        recent_tech_count = 0
+        recent_order_count = 0
+
+        if conversation_history:
+            for msg in reversed(conversation_history[-6:]):
+                if msg.get("role") == "assistant":
+                    if msg.get("agent_used") == "refund":
+                        recent_refund_count += 1
+                    elif msg.get("agent_used") == "tech_support":
+                        recent_tech_count += 1
+                    elif msg.get("agent_used") == "order_query":
+                        recent_order_count += 1
+            history_str = "\n".join([
+                f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+                for m in conversation_history[-4:]
+            ])
+            history_context = f"\n\n之前的对话历史：\n{history_str}"
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": f"用户消息：{message}{history_context}"}
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages, temperature=0.1)
+            content = response["content"]
+
+            import re as _re
+            json_pattern = r'\{[^{}]*\}'
+            matches = _re.findall(json_pattern, content, _re.DOTALL)
+
+            if matches:
+                result = json.loads(matches[0])
+                intent_str = result.get("intent", "general")
+                confidence = float(result.get("confidence", 0.5))
+                reason = result.get("reason", "")
+
+                intent_map = {
+                    "refund": AgentType.REFUND,
+                    "tech_support": AgentType.TECH_SUPPORT,
+                    "order_query": AgentType.ORDER_QUERY,
+                    "general": AgentType.GENERAL
+                }
+                agent_type = intent_map.get(intent_str, AgentType.GENERAL)
+                confidence = max(0.0, min(1.0, confidence))
+
+                if recent_refund_count >= 1 and len(message) < 20:
+                    agent_type = AgentType.REFUND
+                    confidence = 0.9
+                    reason = f"上下文检测：前 {recent_refund_count} 轮在退货流程中，当前为简短消息 '{message}'，保持退货处理"
+                elif recent_tech_count >= 1 and len(message) < 20:
+                    agent_type = AgentType.TECH_SUPPORT
+                    confidence = 0.85
+                    reason = f"上下文检测：前 {recent_tech_count} 轮在技术支持流程中，当前为简短消息 '{message}'，保持技术支持"
+                elif recent_order_count >= 1 and len(message) < 20:
+                    agent_type = AgentType.ORDER_QUERY
+                    confidence = 0.88
+                    reason = f"上下文检测：前 {recent_order_count} 轮在订单流程中，当前为简短消息 '{message}'，保持订单查询"
+
+                return agent_type, confidence, reason
+            else:
+                return AgentType.GENERAL, 0.5, "意图识别失败，使用默认路由"
+        except Exception as e:
+            return AgentType.GENERAL, 0.5, f"意图识别异常：{str(e)}"
+
+    async def aroute(self, message: str, session_id: str = None, conversation_history: List[Dict] = None) -> Dict[str, Any]:
+        """异步路由（不阻塞 event loop）"""
+        agent_type, confidence, reason = await self.aclassify_intent(message, conversation_history)
         return {
             "agent_type": agent_type,
             "confidence": confidence,

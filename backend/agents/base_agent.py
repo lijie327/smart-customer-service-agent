@@ -2,6 +2,7 @@
 
 所有专业Agent的基类
 """
+import asyncio
 import json
 import re
 from typing import List, Dict, Any, Optional, Callable
@@ -157,14 +158,144 @@ class BaseAgent:
             "error": "超过最大迭代次数"
         }
 
+    def _extract_result_text(self, tool_result: Any) -> str:
+        """将工具结果转成可读文本（供流式逐字吐出）"""
+        if isinstance(tool_result, list) and len(tool_result) > 0:
+            first = tool_result[0]
+            if isinstance(first, dict):
+                return first.get("answer", first.get("content", str(tool_result)))
+            return str(first)
+        return str(tool_result)
+
+    async def _aexecute_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
+        """异步执行工具：同步工具调用放到线程池，避免阻塞事件循环"""
+        if tool_name not in self.tools:
+            return {"error": f"工具 {tool_name} 不存在"}
+        try:
+            tool = self.tools[tool_name]
+            result = await asyncio.to_thread(tool.invoke, params)
+            return result
+        except Exception as e:
+            return {"error": f"工具执行失败: {str(e)}"}
+
     async def aexecute(self, messages: List[Dict[str, str]], max_iterations: int = 3) -> Dict[str, Any]:
         """
-        异步执行 Agent（不阻塞 event loop）
+        真·异步 ReAct 循环（不阻塞 event loop）。
 
-        将同步 execute 放到线程池中执行。
+        每一轮都用 `await self.llm.ainvoke` 做决策/生成，工具调用经线程池异步执行。
         """
-        import asyncio
-        return await asyncio.to_thread(self.execute, messages, max_iterations)
+        full_messages = self._build_messages(messages)
+        tool_calls_history = []
+        iterations = 0
+
+        while iterations < max_iterations:
+            iterations += 1
+
+            # 异步调用 LLM 做决策/生成
+            response = await self.llm.ainvoke(full_messages)
+            content = response.get("content") or ""
+
+            # 检查是否有工具调用
+            tool_call = self._parse_tool_call(content) if content else None
+
+            if tool_call:
+                tool_name = tool_call["tool_name"]
+                params = tool_call["params"]
+                tool_result = await self._aexecute_tool(tool_name, params)
+                tool_calls_history.append({
+                    "tool": tool_name,
+                    "params": params,
+                    "result": tool_result
+                })
+
+                if self._is_empty_tool_result(tool_result):
+                    full_messages.append({"role": "assistant", "content": content})
+                    full_messages.append({"role": "user", "content": (
+                        f"工具 {tool_name} 返回了空结果。"
+                        f"请根据你的知识直接回答用户的问题，不要再次调用工具。"
+                        f"如果确实不知道答案，请诚实地告诉用户并建议转人工客服。"
+                    )})
+                    continue
+
+                return {
+                    "reply": self._extract_result_text(tool_result),
+                    "agent": self.name,
+                    "tool_calls": tool_calls_history,
+                    "iterations": iterations,
+                    "usage": response.get("usage", {})
+                }
+            else:
+                clean_content = re.sub(r'\[TOOL_CALL\].*?\[/TOOL_CALL\]', '', content, flags=re.DOTALL).strip()
+                if not clean_content:
+                    clean_content = "抱歉，我暂时无法处理您的问题，请稍后重试。"
+                return {
+                    "reply": clean_content,
+                    "agent": self.name,
+                    "tool_calls": tool_calls_history,
+                    "iterations": iterations,
+                    "usage": response.get("usage", {})
+                }
+
+        return {
+            "reply": "抱歉，我暂时无法处理您的问题，建议转接人工客服获得更准确的帮助。",
+            "agent": self.name,
+            "tool_calls": tool_calls_history,
+            "iterations": iterations,
+            "error": "超过最大迭代次数"
+        }
+
+    async def astream(self, messages: List[Dict[str, str]], max_iterations: int = 3):
+        """
+        真·异步流式 ReAct：
+
+        1. 先 `await self.llm.ainvoke` 决定是否需要工具调用（结构化决策，非流式）；
+        2. 若需工具调用 → 执行后继续循环；
+        3. 若无需工具调用 → 走 `self.llm.astream` 真·流式逐 token 输出最终回答。
+
+        注：最终回答采用「先决策后流式」的两段式，是函数调用场景的标准做法 —
+        既保证工具调用的结构化可靠，又让最终文本以真实 token 流返回前端。
+        """
+        full_messages = self._build_messages(messages)
+        tool_calls_history = []
+        iterations = 0
+
+        while iterations < max_iterations:
+            iterations += 1
+
+            response = await self.llm.ainvoke(full_messages)
+            content = response.get("content") or ""
+            tool_call = self._parse_tool_call(content) if content else None
+
+            if tool_call:
+                tool_name = tool_call["tool_name"]
+                params = tool_call["params"]
+                tool_result = await self._aexecute_tool(tool_name, params)
+                tool_calls_history.append({
+                    "tool": tool_name,
+                    "params": params,
+                    "result": tool_result
+                })
+
+                if self._is_empty_tool_result(tool_result):
+                    full_messages.append({"role": "assistant", "content": content})
+                    full_messages.append({"role": "user", "content": (
+                        f"工具 {tool_name} 返回了空结果。"
+                        f"请根据你的知识直接回答用户的问题，不要再次调用工具。"
+                    )})
+                    continue
+
+                # 工具结果为确定性文本，逐字吐出即可
+                result_text = self._extract_result_text(tool_result)
+                for i in range(0, len(result_text), 5):
+                    yield result_text[i:i + 5]
+                return
+            else:
+                # 最终回答：走 LLM 真·流式输出
+                async for chunk in self.llm.astream(full_messages):
+                    yield chunk
+                return
+
+        yield "抱歉，我暂时无法处理您的问题，建议转接人工客服获得更准确的帮助。"
 
     def stream(self, messages: List[Dict[str, str]]):
         """原始流式输出（不处理工具调用，仅透传 LLM 输出）"""

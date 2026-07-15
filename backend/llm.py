@@ -3,6 +3,7 @@
 DashScope SDK 兼容层
 """
 import asyncio
+import threading
 import dashscope
 from dashscope import Generation, TextEmbedding
 from typing import List, Dict, Any, Generator
@@ -113,6 +114,58 @@ class QwenLLM:
 
         except Exception as e:
             raise Exception(f"流式调用异常: {str(e)}")
+
+    async def astream(
+            self,
+            messages: List[Dict[str, str]],
+            max_tokens: int = 2048,
+            temperature: float = 0.7,
+    ) -> Generator[str, None, None]:
+        """
+        真·异步流式调用（不阻塞 event loop）。
+
+        DashScope 的 Generation.call(stream=True) 返回的是**同步生成器**，
+        若直接在 async 函数里 `for chunk in ...` 会阻塞整个事件循环。
+        这里用独立守护线程消费同步生成器，并通过 asyncio.Queue 把分片
+        安全地抛回事件循环，从而实现非阻塞的真流式输出。
+        """
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue" = asyncio.Queue()
+        _DONE = object()
+
+        def _producer() -> None:
+            try:
+                responses = Generation.call(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    result_format="message",
+                    stream=True,
+                    incremental_output=True,
+                )
+                for response in responses:
+                    if response.status_code == 200:
+                        chunk = response.output.choices[0].message.content
+                        if chunk:
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    else:
+                        raise Exception(f"流式调用失败: {response.code} - {response.message}")
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, e)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+        worker = threading.Thread(target=_producer, daemon=True)
+        worker.start()
+
+        while True:
+            item = await queue.get()
+            if item is _DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
 
 class QwenEmbeddings:

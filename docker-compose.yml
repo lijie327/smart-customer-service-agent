@@ -1,0 +1,66 @@
+# 智能客服多 Agent 系统 - 容器编排
+# 用法：
+#   1) cp .env.example .env  并填入 DASHSCOPE_API_KEY
+#   2) docker compose up -d --build
+#   3) 浏览器访问 http://<服务器IP>   （由 nginx 反代，端口 80）
+#
+# 说明：
+#   - app 不直接对外暴露 8000，仅由同网络内的 nginx 访问（更安全）。
+#   - 若不想用 nginx，可删除 nginx 服务，并给 app 加 `ports: ["8000:8000"]`。
+#   - 数据持久化：app-data 卷保存 SQLite + FAISS 索引；redis-data 保存会话。
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 容器内通过服务名访问 redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # 持久化：SQLite 数据库 + FAISS 索引 + 上传文件
+      - app-data:/app/data
+      - app-uploads:/app/uploads
+    # 仅对内网（nginx）开放
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+
+volumes:
+  app-data:
+  app-uploads:
+  redis-data:

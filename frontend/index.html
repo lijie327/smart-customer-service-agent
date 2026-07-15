@@ -11,6 +11,13 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
+    <!-- 极光动态背景 -->
+    <div class="ambient-bg" aria-hidden="true">
+        <span class="orb orb-1"></span>
+        <span class="orb orb-2"></span>
+        <span class="orb orb-3"></span>
+    </div>
+
     <div class="app-container">
         <!-- 左侧：工单列表和统计 -->
         <aside class="sidebar left-sidebar" id="leftSidebar">
@@ -50,11 +57,26 @@
                         <div class="stat-label">平均时长</div>
                     </div>
                 </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon warning">
+                        <i class="fas fa-user-shield"></i>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="escalationCount">0</div>
+                        <div class="stat-label">转人工</div>
+                    </div>
+                </div>
             </div>
 
             <!-- 新建对话按钮 -->
             <button class="btn-new-chat" id="btnNewChat">
                 <i class="fas fa-plus"></i> 新建对话
+            </button>
+
+            <!-- 链路追踪按钮 -->
+            <button class="btn-new-chat btn-traces" id="btnTraces">
+                <i class="fas fa-project-diagram"></i> 链路追踪
             </button>
 
             <!-- 工单列表 -->
@@ -79,6 +101,9 @@
                         <i class="fas fa-circle"></i> 在线
                     </span>
                 </div>
+                <button class="btn-theme" id="toggleTheme" title="切换主题">
+                    <i class="fas fa-moon"></i>
+                </button>
                 <button class="mobile-toggle" id="toggleRight">
                     <i class="fas fa-info-circle"></i>
                 </button>
@@ -140,6 +165,30 @@
                 </div>
             </div>
         </aside>
+    </div>
+
+    <!-- 链路追踪弹窗 -->
+    <div class="modal-overlay" id="tracesModal">
+        <div class="modal-panel">
+            <div class="modal-header">
+                <h3><i class="fas fa-project-diagram"></i> 链路追踪</h3>
+                <button class="modal-close" id="closeTracesModal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="traces-toolbar">
+                    <label class="traces-filter">
+                        <input type="checkbox" id="tracesEscalatedOnly"> 仅看转人工
+                    </label>
+                    <button class="btn-refresh" id="btnRefreshTraces"><i class="fas fa-sync"></i> 刷新</button>
+                </div>
+                <div class="traces-list" id="tracesList">
+                    <div class="empty-state">
+                        <i class="fas fa-stream"></i>
+                        <p>暂无链路数据，发起对话后将自动记录</p>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Toast提示 -->

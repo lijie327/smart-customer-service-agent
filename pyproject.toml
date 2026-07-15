@@ -1,5 +1,17 @@
 [project]
 name = "smart-cs"
 version = "0.1.0"
+description = "智能客服多 Agent 系统：FastAPI + 通义千问 + RAG + 多 Agent 编排"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "langchain",
+    "python-dotenv",
+    "python-multipart",
+    "dashscope",
+    "pydantic",
+    "redis",
+    "faiss-cpu",
+    "numpy",
+]

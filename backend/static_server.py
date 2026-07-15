@@ -3,9 +3,12 @@
 用于开发环境提供前端静态文件服务
 """
 import os
+import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+
+logger = logging.getLogger(__name__)
 
 
 def setup_static_files(app: FastAPI):
@@ -30,6 +33,6 @@ def setup_static_files(app: FastAPI):
             # SPA 回退：所有未匹配路径返回 index.html
             return FileResponse(os.path.join(frontend_dir, "index.html"))
 
-        print(f"✓ 前端静态文件已挂载: {frontend_dir}")
+        logger.info("Frontend static files mounted: %s", frontend_dir)
     else:
-        print(f"⚠ 前端目录不存在: {frontend_dir}")
+        logger.warning("Frontend directory does not exist: %s", frontend_dir)
