@@ -251,3 +251,14 @@ data: {"type": "done", "done": true, "ticket_id": "xxx", "escalated": false}
 ## 📄 许可证
 
 MIT License
+<<<<<<< HEAD
+=======
+
+## 🤝 贡献
+
+欢迎提交Issue和Pull Request！
+
+## 📧 联系方式
+
+如有问题，请联系：l2172433823@163.com
+>>>>>>> 43c792453e8f7cc988982f4ae9fe2dd99c5dcb5f
