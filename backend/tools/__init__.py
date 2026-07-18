@@ -16,8 +16,6 @@ from .knowledge_tools import (
 from .system_tools import (
     get_current_time,
     escalate_to_human,
-    log_interaction,
-    validate_user_input,
 )
 
 # 所有工具列表，便于Agent加载
@@ -32,8 +30,6 @@ ALL_TOOLS = [
     # 系统工具
     get_current_time,
     escalate_to_human,
-    log_interaction,
-    validate_user_input,
 ]
 
 # 按类别分组的工具
@@ -51,8 +47,6 @@ KNOWLEDGE_TOOLS = [
 SYSTEM_TOOLS = [
     get_current_time,
     escalate_to_human,
-    log_interaction,
-    validate_user_input,
 ]
 
 __all__ = [
@@ -66,8 +60,6 @@ __all__ = [
     # 系统工具
     "get_current_time",
     "escalate_to_human",
-    "log_interaction",
-    "validate_user_input",
     # 工具集合
     "ALL_TOOLS",
     "ORDER_TOOLS",
