@@ -291,10 +291,16 @@ class QwenEmbeddings(Embeddings):
     """通义千问文本向量化（LangChain Embeddings 封装）。
 
     可直接用于 FAISS / EnsembleRetriever 等需要 Embeddings 接口的检索器。
+
+    注意：langchain_core 的 `Embeddings` 是普通 ABC（非 pydantic 模型），
+    因此这里必须显式定义 `__init__` 来接收 api_key / model，不能像
+    `QwenLLM(BaseChatModel)` 那样靠 pydantic 字段注解。
     """
 
-    api_key: Optional[str] = None
-    model: str = "text-embedding-v2"
+    def __init__(self, api_key: Optional[str] = None, model: str = "text-embedding-v2"):
+        super().__init__()
+        self.api_key = api_key
+        self.model = model
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """批量文本转向量。"""
