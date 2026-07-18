@@ -14,7 +14,7 @@
 | **双引擎路由** | 关键词快路径（省 LLM 调用、低延迟）+ LLM 语义分类 + 多轮上下文感知；自建 108 条评测集，准确率 **100%** |
 | **混合检索 RAG** | `HybridFAQRetriever`：FAISS 向量召回 + BM25 关键词召回 → RRF 融合重排 → 返回置信度与引用出处 |
 | **置信度门控抗幻觉** | 检索置信度 ≥0.60 直接命中 FAQ；<0.35 标记低置信并触发转人工 |
-| **全链路异步 + 真流式** | `QwenLLM.astream` 线程+Queue 桥接同步流；`BaseAgent.astream` 逐 token 真流式，不阻塞事件循环 |
+| **全链路异步 + 真流式** | 基于 LangChain Runnable 的 `QwenLLM.astream`（线程+Queue 桥接 DashScope 同步流）；`BaseAgent.astream` 逐 token 真流式，不阻塞事件循环 |
 | **SQLite 持久化** | Repository 模式（订单 / 工单 / 每日指标三表）+ 800 条合成订单 seed，服务重启零丢失 |
 | **转人工闭环** | 低置信 / 兜底话术自动转人工：SSE `escalation` 事件 + 工单 `escalated=1` 落库 + 统计累计 |
 | **可观测** | `RequestTrace / TraceSpan / TraceStore` 环形缓冲 + `/api/traces` 接口 + 前端链路追踪面板 |
@@ -53,6 +53,22 @@ approve_refund  置信度门控      query_order    search_faq
 
 ---
 
+## 🔗 LangChain 工程实践（简历 / 面试重点）
+
+本项目**确实落地了 LangChain**，而非仅用 `@tool` 装饰器：核心 LLM 与 Embedding 均继承自 LangChain 标准基类，工具调度使用**原生 function calling**，全链路走 LCEL Runnable 协议。
+
+| 实践点 | 说明 |
+|---|---|
+| **自定义 ChatModel** | `QwenLLM(BaseChatModel)`：把阿里云百炼（DashScope）通义千问封装为标准 LangChain `Runnable`，实现 `_generate / _agenerate / _stream / _astream`，对外暴露统一的 `invoke / ainvoke / stream / astream`。 |
+| **自定义 Embeddings** | `QwenEmbeddings(Embeddings)`：把通义千问向量模型封装为 LangChain `Embeddings`，直接喂给 `FAISS` 向量检索与 `EnsembleRetriever`，是混合检索 RAG 的向量通道。 |
+| **原生 function calling（非手写正则）** | Agent 工具调度基于 `llm.bind_tools(tools)`：模型返回结构化的 `AIMessage.tool_calls`，ReAct 循环**直接读取结构化 `tool_calls`** 执行工具并回填 `ToolMessage`，彻底替代早期手写的 `[TOOL_CALL]...[/TOOL_CALL]` 正则解析（更稳、可扩展、贴合官方范式）。 |
+| **全链路 LCEL + 异步真流式** | 异步入口走 `ainvoke / astream`；`astream` 通过线程 + `asyncio.Queue` 桥接 DashScope 同步流，在 FastAPI 事件循环内逐 token 输出，不阻塞。 |
+| **消息协议对齐** | 所有 LLM 交互统一使用 `HumanMessage / AIMessage / SystemMessage / ToolMessage`，与 LangChain 回调、tracing、`RunnableBinding` 天然兼容。 |
+
+> 注：本仓库使用的是 **LangChain 1.x（`langchain-core` + `langchain`）**。其官方已废弃 `langchain.agents.AgentExecutor` 等旧版 Agent 编排，转向 **LangGraph**；因此本项目保留「LLM 原生 function calling + 自写 ReAct 循环」的轻量方案，既贴合 1.x 范式，又避免引入额外编排框架，便于讲清工具调用全流程。
+
+---
+
 ## 📦 项目结构
 
 ```
@@ -61,7 +77,7 @@ smart_cs/
 │   ├── main.py            # FastAPI 入口 + lifespan 初始化（注入默认混合检索器、初始化 DB）
 │   ├── api.py             # 路由层：/api/chat(SSE)、tickets、stats、traces、health、upload-faq
 │   ├── config.py          # 配置 + 阈值常量（RAG_CONF_HIGH/LOW、ESCALATION_CONFIDENCE、TRACE_BUFFER_SIZE）
-│   ├── llm.py             # QwenLLM / QwenEmbeddings（含 ainvoke / astream 真流式）
+│   ├── llm.py             # ★ QwenLLM(BaseChatModel) / QwenEmbeddings(Embeddings)：LangChain 标准封装 + 原生 bind_tools 函数调用
 │   ├── rag.py             # FAQProcessor：FAISS 向量支路（作为混合检索的向量通道）
 │   ├── rag_retriever.py   # ★ HybridFAQRetriever：向量 + BM25 + RRF 融合 + 置信度 + 引用溯源
 │   ├── tracing.py         # ★ RequestTrace / TraceSpan / TraceStore（可观测）
@@ -228,6 +244,8 @@ data: {"type": "done", "done": true, "ticket_id": "xxx", "escalated": false}
 
 **工具集**：`query_order_status` / `approve_refund` / `get_order_detail`（订单）· `search_faq` / `search_policy`（知识库）· `get_current_time` / `escalate_to_human` / `validate_user_input`（系统）
 
+> 工具调度统一基于 LangChain **`bind_tools` 原生 function calling**：`BaseAgent.__init__` 把工具绑定到 `QwenLLM`（`llm.bind_tools(tools)`），模型返回结构化 `AIMessage.tool_calls`，ReAct 循环直接读取并执行、回填 `ToolMessage`，**不再使用手写正则解析 `[TOOL_CALL]`**。
+
 ---
 
 ## 🔧 关键阈值配置（`backend/config.py`）
@@ -251,8 +269,6 @@ data: {"type": "done", "done": true, "ticket_id": "xxx", "escalated": false}
 ## 📄 许可证
 
 MIT License
-<<<<<<< HEAD
-=======
 
 ## 🤝 贡献
 
@@ -261,4 +277,3 @@ MIT License
 ## 📧 联系方式
 
 如有问题，请联系：l2172433823@163.com
->>>>>>> 43c792453e8f7cc988982f4ae9fe2dd99c5dcb5f

@@ -51,16 +51,21 @@ def _is_fallback_reply(reply: str) -> bool:
 
 
 async def _stream_llm_fallback(llm, user_message: str, conversation_history: list = None):
-    messages = [{"role": "system", "content": "你是通用客服，用你自己的知识直接回答用户问题，简洁友好"}]
+    from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
+
+    messages = [SystemMessage(content="你是通用客服，用你自己的知识直接回答用户问题，简洁友好")]
     if conversation_history:
         for h in conversation_history[-4:]:
             role = h.get("role", "user")
             content = h.get("content", "")
-            if role in ("user", "assistant"):
-                messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": user_message})
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessageChunk(content=content))
+    messages.append(HumanMessage(content=user_message))
     async for chunk in llm.astream(messages):
-        yield chunk
+        # QwenLLM.astream 直接吐文本字符串；若拿到分片对象则取其 content
+        yield chunk if isinstance(chunk, str) else getattr(chunk, "content", str(chunk))
 
 
 BUSINESS_KEYWORDS = [

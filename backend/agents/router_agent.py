@@ -4,9 +4,25 @@
 """
 import json
 from typing import Dict, Any, Tuple, List
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from backend.models import AgentType
 from backend.agents.base_agent import BaseAgent
 from backend.llm import QwenLLM
+
+
+def _to_lc_messages(messages) -> List[Any]:
+    """把 [{"role","content"}] 转成 LangChain 消息（供 BaseChatModel 调用）。"""
+    lc: List[Any] = []
+    for m in messages or []:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "user":
+            lc.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc.append(AIMessage(content=content))
+        elif role == "system":
+            lc.append(SystemMessage(content=content))
+    return lc
 
 
 class RouterAgent:
@@ -126,8 +142,8 @@ class RouterAgent:
         ]
 
         try:
-            response = self.llm.invoke(messages, temperature=0.1)
-            content = response["content"]
+            response = self.llm.invoke(_to_lc_messages(messages), temperature=0.1)
+            content = response.content
 
             # 解析 JSON 响应
             # 尝试提取 JSON 块
@@ -239,8 +255,8 @@ class RouterAgent:
         ]
 
         try:
-            response = await self.llm.ainvoke(messages, temperature=0.1)
-            content = response["content"]
+            response = await self.llm.ainvoke(_to_lc_messages(messages), temperature=0.1)
+            content = response.content
 
             import re as _re
             json_pattern = r'\{[^{}]*\}'

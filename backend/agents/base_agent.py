@@ -1,334 +1,225 @@
-"""基础Agent类
+"""基础 Agent 类 —— 基于 LangChain bind_tools 原生 function calling 构建。
 
-所有专业Agent的基类
+核心变化（相比旧手写实现）：
+- 工具调度不再用手写正则解析 `[TOOL_CALL]...[/TOOL_CALL]`，而是用 LangChain 原生
+  `bind_tools` + `AIMessage.tool_calls` 的 function calling 协议；
+- ReAct 循环（决策 → 调工具 → 观察 → 再决策）保留，但工具调用解析改为读取模型返回的
+  结构化 tool_calls，删除了脆弱的正则解析代码；
+- `astream` 通过真实 `llm.astream` 逐 token 输出最终回答，并保持对工具调用链的追踪。
+
+对外契约保持不变：`execute`/`aexecute` 返回
+`{"reply", "agent", "tool_calls", "iterations", "usage"}`；`astream` 是逐字符串的
+异步生成器，供 SSE 直接消费。
 """
 import asyncio
-import json
-import re
-from typing import List, Dict, Any, Optional, Callable
+import logging
+from typing import Any, Dict, List, Optional
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
 from backend.llm import QwenLLM
+
+logger = logging.getLogger(__name__)
 
 
 class BaseAgent:
-    """基础Agent类"""
+    """基础 Agent：bind_tools 原生 function calling + ReAct 工具循环。"""
 
     def __init__(
         self,
         name: str,
         tools: List[Any],
         system_prompt: str,
-        llm: QwenLLM = None
+        llm: QwenLLM = None,
+        max_iterations: int = 3,
     ):
         self.name = name
         self.tools = {tool.name: tool for tool in tools}
         self.system_prompt = system_prompt
         self.llm = llm
+        self.max_iterations = max_iterations
+        # 绑定工具，使模型可以返回原生 tool_calls
+        self.llm_with_tools = llm.bind_tools(tools) if llm is not None else None
 
-    def _build_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        full_messages = [{"role": "system", "content": self.system_prompt}]
-        full_messages.extend(messages)
-        return full_messages
+    # ------------------------------------------------------------------
+    # 工具方法
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_lc_messages(messages) -> List[Any]:
+        """把 [{"role", "content"}] 或混合消息列表转成 LangChain 消息对象。"""
+        if not messages:
+            return []
+        lc: List[Any] = []
+        for m in messages:
+            if isinstance(m, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
+                lc.append(m)
+                continue
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "user":
+                lc.append(HumanMessage(content=content))
+            elif role == "assistant":
+                lc.append(AIMessage(content=content))
+            elif role == "system":
+                lc.append(SystemMessage(content=content))
+        return lc
 
-    def _parse_tool_call(self, content: str) -> Optional[Dict[str, Any]]:
-        # 解析 JSON 格式（支持嵌套的简单对象）
+    @staticmethod
+    def _extract_user_text(messages) -> str:
+        if isinstance(messages, str):
+            return messages
+        if isinstance(messages, list):
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    return m.get("content", "")
+                if isinstance(m, HumanMessage):
+                    return m.content
+        return ""
+
+    def _build_messages(self, messages) -> List[Any]:
+        full: List[Any] = [SystemMessage(content=self.system_prompt)]
+        full.extend(self._to_lc_messages(messages))
+        return full
+
+    @staticmethod
+    def _build_tool_calls_history(calls) -> List[Dict[str, Any]]:
+        return [
+            {
+                "tool": c.get("tool", ""),
+                "params": c.get("params", {}) or {},
+                "result": c.get("result"),
+            }
+            for c in calls
+        ]
+
+    # ------------------------------------------------------------------
+    # 工具执行
+    # ------------------------------------------------------------------
+    async def _execute_tool(self, tool_name: str, args: Dict[str, Any], tool_call_id: str):
+        """执行单个工具，返回 (observation, error?)。"""
+        tool = self.tools.get(tool_name)
         try:
-            json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*"tool"(?:[^{}]|(?:\{[^{}]*\}))*\}'
-            matches = re.findall(json_pattern, content, re.DOTALL)
-            for match in matches:
-                data = json.loads(match)
-                if "tool" in data:
-                    return {"tool_name": data["tool"], "params": data.get("params", {})}
-        except Exception:
-            pass
+            if tool is None:
+                return {"error": f"工具 {tool_name} 不存在"}, True
+            result = await asyncio.to_thread(tool.invoke, args or {})
+            return result, False
+        except Exception as e:  # noqa: BLE001
+            logger.error("工具 %s 执行失败: %s", tool_name, e)
+            return {"error": f"工具执行失败: {str(e)}"}, True
 
-        # 解析标记格式 [TOOL_CALL]xxx[/TOOL_CALL]
-        tool_call_pattern = r'\[TOOL_CALL\](.*?)\[/TOOL_CALL\]'
-        match = re.search(tool_call_pattern, content, re.DOTALL)
-        if match:
-            tool_call_str = match.group(1).strip()
-            func_pattern = r'(\w+)\((.*?)\)'
-            func_match = re.match(func_pattern, tool_call_str, re.DOTALL)
-            if func_match:
-                tool_name = func_match.group(1)
-                params_str = func_match.group(2)
-                params = {}
-                if params_str.strip():
-                    param_pairs = re.findall(r'(\w+)\s*=\s*([^,]+)', params_str)
-                    for key, value in param_pairs:
-                        try:
-                            params[key.strip()] = json.loads(value.strip())
-                        except Exception:
-                            params[key.strip()] = value.strip().strip('"\'')
-                return {"tool_name": tool_name, "params": params}
-        return None
+    # ------------------------------------------------------------------
+    # 执行入口
+    # ------------------------------------------------------------------
+    def execute(
+        self,
+        messages=None,
+        user_message: Optional[str] = None,
+        max_iterations: Optional[int] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """同步执行（工具调用经线程池异步化，不阻塞事件循环）。
 
-    def _execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
-        if tool_name not in self.tools:
-            return {"error": f"工具 {tool_name} 不存在"}
+        兼容在同步上下文或事件循环内调用：若当前已有运行中的循环，则委托给独立线程运行。
+        """
+        coro = self.aexecute(messages, user_message, max_iterations, **kwargs)
         try:
-            tool = self.tools[tool_name]
-            result = tool.invoke(params)
-            return result
-        except Exception as e:
-            return {"error": f"工具执行失败: {str(e)}"}
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        if loop.is_running():
+            import concurrent.futures
 
-    def _is_empty_tool_result(self, tool_result: Any) -> bool:
-        """判断工具结果是否为空（FAQ搜索无结果、查询无数据等）"""
-        if tool_result is None:
-            return True
-        if isinstance(tool_result, list) and len(tool_result) == 0:
-            return True
-        if isinstance(tool_result, dict):
-            if tool_result.get("error"):
-                return True
-            # search_policy 返回 None 时已被转成空
-        if isinstance(tool_result, str) and tool_result.strip() in ("", "[]", "{}", "null", "None"):
-            return True
-        return False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                return ex.submit(lambda: asyncio.run(coro)).result()
+        return loop.run_until_complete(coro)
 
-    def execute(self, messages: List[Dict[str, str]], max_iterations: int = 3) -> Dict[str, Any]:
+    async def aexecute(
+        self,
+        messages=None,
+        user_message: Optional[str] = None,
+        max_iterations: Optional[int] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """异步 ReAct 循环：原生 function calling 驱动工具调度。"""
+        if user_message is None:
+            user_message = self._extract_user_text(messages)
         full_messages = self._build_messages(messages)
-        tool_calls_history = []
+        max_iter = max_iterations or self.max_iterations
+        tool_calls: List[Dict[str, Any]] = []
         iterations = 0
 
-        while iterations < max_iterations:
+        while iterations < max_iter:
             iterations += 1
+            response = await self.llm_with_tools.ainvoke(full_messages)
 
-            # 调用LLM
-            response = self.llm.invoke(full_messages)
-            content = response.get("content") or ""  # 防护：None / 空值统一转为空字符串
-
-            # 检查是否有工具调用
-            tool_call = self._parse_tool_call(content) if content else None
-
-            if tool_call:
-                tool_name = tool_call["tool_name"]
-                params = tool_call["params"]
-                tool_result = self._execute_tool(tool_name, params)
-                tool_calls_history.append({
-                    "tool": tool_name,
-                    "params": params,
-                    "result": tool_result
-                })
-
-                # 工具结果空 → 追加结果到消息，让 LLM 再回答一次（调用大模型兜底）
-                if self._is_empty_tool_result(tool_result):
-                    full_messages.append({"role": "assistant", "content": content})
-                    full_messages.append({"role": "user", "content": (
-                        f"工具 {tool_name} 返回了空结果。"
-                        f"请根据你的知识直接回答用户的问题，不要再次调用工具。"
-                        f"如果确实不知道答案，请诚实地告诉用户并建议转人工客服。"
-                    )})
-                    continue  # 回到 while 循环，让 LLM 再生成一次
-
-                # 工具有结果 → 提取可读文本
-                result_text = str(tool_result)
-                # 如果是FAQ结果，取第一条答案
-                if isinstance(tool_result, list) and len(tool_result) > 0:
-                    first = tool_result[0]
-                    if isinstance(first, dict):
-                        result_text = first.get("answer", first.get("content", str(tool_result)))
-
+            # 无工具调用 → 最终回答
+            if not getattr(response, "tool_calls", None):
+                reply = response.content or ""
                 return {
-                    "reply": result_text,
+                    "reply": reply,
                     "agent": self.name,
-                    "tool_calls": tool_calls_history,
+                    "tool_calls": self._build_tool_calls_history(tool_calls),
                     "iterations": iterations,
-                    "usage": response.get("usage", {})
+                    "usage": {},
                 }
-            else:
-                # 无工具调用 → 清理标记后直接返回 LLM 回答
-                clean_content = re.sub(r'\[TOOL_CALL\].*?\[/TOOL_CALL\]', '', content, flags=re.DOTALL).strip()
-                if not clean_content:
-                    # 兜底：内容全是工具调用标记，不返回原始标记给用户
-                    clean_content = "抱歉，我暂时无法处理您的问题，请稍后重试。"
-                return {
-                    "reply": clean_content,
-                    "agent": self.name,
-                    "tool_calls": tool_calls_history,
-                    "iterations": iterations,
-                    "usage": response.get("usage", {})
-                }
+
+            # 有工具调用 → 逐个执行并回填 ToolMessage
+            full_messages.append(
+                AIMessage(content=response.content or "", tool_calls=response.tool_calls)
+            )
+            for tc in response.tool_calls:
+                name = tc.get("name")
+                args = tc.get("args", {}) or {}
+                call_id = tc.get("id") or f"call_{name}"
+                observation, _ = await self._execute_tool(name, args, call_id)
+                tool_calls.append(
+                    {"tool": name, "params": args, "result": observation}
+                )
+                full_messages.append(
+                    ToolMessage(content=str(observation), name=name, tool_call_id=call_id)
+                )
 
         return {
             "reply": "抱歉，我暂时无法处理您的问题，建议转接人工客服获得更准确的帮助。",
             "agent": self.name,
-            "tool_calls": tool_calls_history,
+            "tool_calls": self._build_tool_calls_history(tool_calls),
             "iterations": iterations,
-            "error": "超过最大迭代次数"
+            "error": "超过最大迭代次数",
         }
 
-    def _extract_result_text(self, tool_result: Any) -> str:
-        """将工具结果转成可读文本（供流式逐字吐出）"""
-        if isinstance(tool_result, list) and len(tool_result) > 0:
-            first = tool_result[0]
-            if isinstance(first, dict):
-                return first.get("answer", first.get("content", str(tool_result)))
-            return str(first)
-        return str(tool_result)
+    async def astream(self, messages, max_iterations: Optional[int] = None):
+        """真·异步流式：先 ReAct 决策（ainvoke），最终回答走 llm.astream 逐 token 输出。
 
-    async def _aexecute_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
-        """异步执行工具：同步工具调用放到线程池，避免阻塞事件循环"""
-        if tool_name not in self.tools:
-            return {"error": f"工具 {tool_name} 不存在"}
-        try:
-            tool = self.tools[tool_name]
-            result = await asyncio.to_thread(tool.invoke, params)
-            return result
-        except Exception as e:
-            return {"error": f"工具执行失败: {str(e)}"}
-
-    async def aexecute(self, messages: List[Dict[str, str]], max_iterations: int = 3) -> Dict[str, Any]:
+        工具调用阶段不产生文本，仅最终回答阶段流式吐字；同时记录工具调用链。
         """
-        真·异步 ReAct 循环（不阻塞 event loop）。
-
-        每一轮都用 `await self.llm.ainvoke` 做决策/生成，工具调用经线程池异步执行。
-        """
+        if self.llm_with_tools is None:
+            return
         full_messages = self._build_messages(messages)
-        tool_calls_history = []
+        max_iter = max_iterations or self.max_iterations
         iterations = 0
 
-        while iterations < max_iterations:
+        while iterations < max_iter:
             iterations += 1
+            response = await self.llm_with_tools.ainvoke(full_messages)
 
-            # 异步调用 LLM 做决策/生成
-            response = await self.llm.ainvoke(full_messages)
-            content = response.get("content") or ""
-
-            # 检查是否有工具调用
-            tool_call = self._parse_tool_call(content) if content else None
-
-            if tool_call:
-                tool_name = tool_call["tool_name"]
-                params = tool_call["params"]
-                tool_result = await self._aexecute_tool(tool_name, params)
-                tool_calls_history.append({
-                    "tool": tool_name,
-                    "params": params,
-                    "result": tool_result
-                })
-
-                if self._is_empty_tool_result(tool_result):
-                    full_messages.append({"role": "assistant", "content": content})
-                    full_messages.append({"role": "user", "content": (
-                        f"工具 {tool_name} 返回了空结果。"
-                        f"请根据你的知识直接回答用户的问题，不要再次调用工具。"
-                        f"如果确实不知道答案，请诚实地告诉用户并建议转人工客服。"
-                    )})
-                    continue
-
-                return {
-                    "reply": self._extract_result_text(tool_result),
-                    "agent": self.name,
-                    "tool_calls": tool_calls_history,
-                    "iterations": iterations,
-                    "usage": response.get("usage", {})
-                }
-            else:
-                clean_content = re.sub(r'\[TOOL_CALL\].*?\[/TOOL_CALL\]', '', content, flags=re.DOTALL).strip()
-                if not clean_content:
-                    clean_content = "抱歉，我暂时无法处理您的问题，请稍后重试。"
-                return {
-                    "reply": clean_content,
-                    "agent": self.name,
-                    "tool_calls": tool_calls_history,
-                    "iterations": iterations,
-                    "usage": response.get("usage", {})
-                }
-
-        return {
-            "reply": "抱歉，我暂时无法处理您的问题，建议转接人工客服获得更准确的帮助。",
-            "agent": self.name,
-            "tool_calls": tool_calls_history,
-            "iterations": iterations,
-            "error": "超过最大迭代次数"
-        }
-
-    async def astream(self, messages: List[Dict[str, str]], max_iterations: int = 3):
-        """
-        真·异步流式 ReAct：
-
-        1. 先 `await self.llm.ainvoke` 决定是否需要工具调用（结构化决策，非流式）；
-        2. 若需工具调用 → 执行后继续循环；
-        3. 若无需工具调用 → 走 `self.llm.astream` 真·流式逐 token 输出最终回答。
-
-        注：最终回答采用「先决策后流式」的两段式，是函数调用场景的标准做法 —
-        既保证工具调用的结构化可靠，又让最终文本以真实 token 流返回前端。
-        """
-        full_messages = self._build_messages(messages)
-        tool_calls_history = []
-        iterations = 0
-
-        while iterations < max_iterations:
-            iterations += 1
-
-            response = await self.llm.ainvoke(full_messages)
-            content = response.get("content") or ""
-            tool_call = self._parse_tool_call(content) if content else None
-
-            if tool_call:
-                tool_name = tool_call["tool_name"]
-                params = tool_call["params"]
-                tool_result = await self._aexecute_tool(tool_name, params)
-                tool_calls_history.append({
-                    "tool": tool_name,
-                    "params": params,
-                    "result": tool_result
-                })
-
-                if self._is_empty_tool_result(tool_result):
-                    full_messages.append({"role": "assistant", "content": content})
-                    full_messages.append({"role": "user", "content": (
-                        f"工具 {tool_name} 返回了空结果。"
-                        f"请根据你的知识直接回答用户的问题，不要再次调用工具。"
-                    )})
-                    continue
-
-                # 工具结果为确定性文本，逐字吐出即可
-                result_text = self._extract_result_text(tool_result)
-                for i in range(0, len(result_text), 5):
-                    yield result_text[i:i + 5]
-                return
-            else:
-                # 最终回答：走 LLM 真·流式输出
+            if not getattr(response, "tool_calls", None):
+                # 最终回答：真实逐 token 流式
                 async for chunk in self.llm.astream(full_messages):
                     yield chunk
                 return
 
+            full_messages.append(
+                AIMessage(content=response.content or "", tool_calls=response.tool_calls)
+            )
+            for tc in response.tool_calls:
+                name = tc.get("name")
+                args = tc.get("args", {}) or {}
+                call_id = tc.get("id") or f"call_{name}"
+                observation, _ = await self._execute_tool(name, args, call_id)
+                full_messages.append(
+                    ToolMessage(content=str(observation), name=name, tool_call_id=call_id)
+                )
+
         yield "抱歉，我暂时无法处理您的问题，建议转接人工客服获得更准确的帮助。"
-
-    def stream(self, messages: List[Dict[str, str]]):
-        """原始流式输出（不处理工具调用，仅透传 LLM 输出）"""
-        full_messages = self._build_messages(messages)
-        for chunk in self.llm.stream(full_messages):
-            yield chunk
-
-    def stream_with_tool_handling(self, messages: List[Dict[str, str]], max_iterations: int = 3):
-        """
-        带工具调用处理的流式输出
-
-        先收集完整 LLM 响应 → 解析工具调用 → 执行工具 → 流式返回结果。
-        与 execute() 逻辑一致，但以生成器形式返回，兼容 SSE 流式接口。
-
-        Args:
-            messages: 消息列表
-            max_iterations: 最大工具调用迭代次数
-
-        Yields:
-            文本片段（模拟流式输出）
-        """
-        result = self.execute(messages, max_iterations)
-        reply = result.get("reply", "") or ""
-        # 兜底：如果 LLM 返回空回复，yield 兜底消息，避免上游收到空内容
-        if not reply.strip():
-            reply = "抱歉，我暂时无法处理您的问题，请稍后重试或转接人工客服。"
-        # 模拟流式输出：每次输出若干字符
-        chunk_size = max(1, len(reply) // 10) or 1
-        for i in range(0, len(reply), chunk_size):
-            yield reply[i:i + chunk_size]
-
-    def get_tool_descriptions(self) -> List[Dict[str, str]]:
-        return [
-            {"name": name, "description": getattr(tool, 'description', str(tool))}
-            for name, tool in self.tools.items()
-        ]

@@ -18,10 +18,14 @@ import json
 import os
 import sys
 from collections import defaultdict
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, ClassVar
 
 # 让脚本可在项目根目录直接运行
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.outputs import ChatResult, ChatGeneration
 
 from backend.agents.router_agent import RouterAgent
 from backend.models import AgentType
@@ -35,22 +39,34 @@ CLASSES = ["refund", "tech_support", "order_query", "general"]
 # 离线分类器：用关键词启发式近似一个"合理的 LLM"，仅用于验证评测链路离线可跑。
 # 真实指标请使用 --real。
 # ---------------------------------------------------------------------------
-class FakeLLM:
-    REFUND_KW = ["退", "换货", "质量", "瑕疵", "破损", "坏", "差价", "不想要",
-                 "描述不一样", "毛病", "拿回来", "退了", "到账"]
-    TECH_KW = ["转圈", "打不开", "屏幕", "充电", "充", "声音", "拍照", "模糊",
-               "设置", "配置", "网络", "连不上", "蓝牙", "wifi", "机", "安装",
-               "规格", "保修", "故障", "报错", "错误", "兼容", "死机", "卡顿",
-               "闪退", "说明书", "维修", "怎么用"]
-    ORDER_KW = ["订单", "物流", "快递", "发货", "配送", "到哪", "单号", "收到",
-                "取消订单", "包裹", "站点", "签收", "揽收", "收货地址", "收货人"]
+class FakeLLM(BaseChatModel):
+    """离线分类器：用关键词启发式近似一个"合理的 LLM"，仅用于验证评测链路离线可跑。
+
+    继承 langchain_core BaseChatModel，返回标准 AIMessage（与 QwenLLM 接口一致）。
+    """
+    model: str = "fake"
+
+    REFUND_KW: ClassVar = ["退", "换货", "质量", "瑕疵", "破损", "坏", "差价", "不想要",
+                           "描述不一样", "毛病", "拿回来", "退了", "到账"]
+    TECH_KW: ClassVar = ["转圈", "打不开", "屏幕", "充电", "充", "声音", "拍照", "模糊",
+                         "设置", "配置", "网络", "连不上", "蓝牙", "wifi", "机", "安装",
+                         "规格", "保修", "故障", "报错", "错误", "兼容", "死机", "卡顿",
+                         "闪退", "说明书", "维修", "怎么用"]
+    ORDER_KW: ClassVar = ["订单", "物流", "快递", "发货", "配送", "到哪", "单号", "收到",
+                          "取消订单", "包裹", "站点", "签收", "揽收", "收货地址", "收货人"]
+
+    @property
+    def _llm_type(self):
+        return "fake"
+
+    @property
+    def _identifying_params(self):
+        return {"model": self.model}
 
     def _classify(self, message: str) -> Tuple[str, float, str]:
         msg = message or ""
-        # 技术优先：含"修"且伴随"坏/怎么" → 技术支持（避免"坏了怎么修"被退货款词抢走）
         if "修" in msg and ("坏" in msg or "怎么" in msg):
             return "tech_support", 0.80, "[FakeLLM] 维修/排障意图 → 技术"
-        # "怎么用"：优惠/发票/会员等通用咨询除外
         if "怎么用" in msg:
             if any(g in msg for g in ("优惠", "发票", "会员", "券")):
                 return "general", 0.70, "[FakeLLM] 优惠/会员类用法 → 通用"
@@ -67,27 +83,29 @@ class FakeLLM:
         return "general", 0.70, "[FakeLLM] 无明确业务信号 → 通用咨询"
 
     @staticmethod
-    def _extract_user(messages: List[Dict[str, str]]) -> str:
+    def _extract_user(messages) -> str:
         for m in reversed(messages):
-            if m.get("role") == "user":
+            if isinstance(m, dict) and m.get("role") == "user":
                 content = m.get("content", "")
-                if content.startswith("用户消息："):
-                    content = content[len("用户消息："):]
-                # 去掉可能拼接的历史上下文
-                idx = content.find("\n\n之前的对话历史：")
-                if idx != -1:
-                    content = content[:idx]
-                return content.strip()
+            elif isinstance(m, HumanMessage):
+                content = m.content
+            else:
+                continue
+            if content.startswith("用户消息："):
+                content = content[len("用户消息："):]
+            idx = content.find("\n\n之前的对话历史：")
+            if idx != -1:
+                content = content[:idx]
+            return content.strip()
         return ""
 
-    def invoke(self, messages: List[Dict[str, str]], temperature: float = 0.1) -> Dict[str, Any]:
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         intent, conf, reason = self._classify(self._extract_user(messages))
-        return {"content": json.dumps(
-            {"intent": intent, "confidence": conf, "reason": reason},
-            ensure_ascii=False)}
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=json.dumps(
+            {"intent": intent, "confidence": conf, "reason": reason}, ensure_ascii=False)))])
 
-    async def ainvoke(self, messages: List[Dict[str, str]], temperature: float = 0.1) -> Dict[str, Any]:
-        return self.invoke(messages, temperature)
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return await asyncio.to_thread(self._generate, messages, stop, run_manager, **kwargs)
 
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
@@ -112,7 +130,7 @@ def evaluate(use_real: bool, use_async: bool) -> Dict[str, Any]:
 
     if use_real and os.environ.get("DASHSCOPE_API_KEY"):
         from backend.llm import QwenLLM
-        llm = QwenLLM()
+        llm = QwenLLM(api_key=os.environ["DASHSCOPE_API_KEY"])
         backend_name = "QwenLLM(real)"
     else:
         if use_real:
