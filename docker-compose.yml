@@ -11,7 +11,10 @@
 
 services:
   redis:
-    image: redis:7-alpine
+    # 生产用 Redis。客户端 redis-py 已锁定 4.x（默认 RESP2 协议），
+    # 因此既能连本地开发时的 Redis 5.0（本地 `uv run` 直连 localhost:6379），
+    # 也能连本容器内的 7.x；无需为握手协议（HELLO/RESP3）担心。
+    image: redis:7.2-alpine
     restart: unless-stopped
     command: redis-server --appendonly yes
     volumes:
