@@ -4,13 +4,15 @@
 
 > 镜像已在 `python:3.13-slim` 下验证（faiss-cpu 有 3.13 预编译 wheel）。如果你本地 Docker 构建时提示 faiss 无对应 wheel，可临时把 `Dockerfile` 的 `FROM python:3.13-slim` 改为 `FROM python:3.13`（带编译工具链），或在 `requirements.txt` 中固定 `faiss-cpu==1.8.0`。
 
+> **部署形态说明**：本仓库采用「精简版」编排——**不含 nginx 反向代理**，`app` 容器直接通过 `8000` 端口对外。下文所有访问地址均为 `:8000`。如需反向代理 / HTTPS，见第五节。
+
 ---
 
 ## 一、服务器准备
 
 1. 在阿里云控制台创建 ECS 实例，安全组放通：
-   - `22` (SSH)，`80` (HTTP)；如需 HTTPS 再加 `443`。
-   - **不要**对外暴露 `8000`（由 nginx 内网反代）。
+   - `22` (SSH)，`8000` (app 直接对外，已无 nginx 反代)；如需 HTTPS 再加 `443`。
+   - 本项目 app 容器直接暴露 8000，无需为 nginx 开放 `80`。
 2. SSH 登录后安装 Docker 与 docker-compose：
 
 ```bash
@@ -28,12 +30,11 @@ sudo systemctl enable --now docker
 ## 二、获取代码与配置
 
 ```bash
-# 方式 A：从 Git 拉取
+# 方式 A（推荐）：从 Git 拉取，在服务器上直接构建（服务器有外网，自动拉取 redis:7.2-alpine + PyPI 依赖）
 git clone <你的仓库地址> smart_cs && cd smart_cs
 
-# 方式 B：本地构建镜像后 docker save/load 到服务器（适合私有仓库不便的场景）
-#   本地： docker compose build && docker compose save smart_cs-app > app.tar
-#   服务器：docker load < app.tar
+# 方式 B：本机 scp 整目录到服务器（同样在服务器上 docker compose up 构建）
+#   scp -r /path/to/smart_cs user@<ECS公网IP>:/home/user/
 ```
 
 配置环境变量（**必填 `DASHSCOPE_API_KEY`**）：
@@ -59,8 +60,8 @@ docker compose logs -f app      # 观察启动日志，确认 "启动成功"
 ```
 
 启动后：
-- 健康检查：`curl http://localhost/api/health` 应返回 `{"status":"healthy",...}`
-- 浏览器访问：`http://<ECS公网IP>` 即可使用（nginx 在 80 端口反代）
+- 健康检查：`curl http://localhost:8000/api/health` 应返回 `{"status":"healthy",...}`
+- 浏览器访问：`http://<ECS公网IP>:8000` 即可使用（app 直出 8000，无 nginx 反代）
 
 ---
 
@@ -76,17 +77,12 @@ docker compose logs -f app      # 观察启动日志，确认 "启动成功"
 
 ## 五、HTTPS / 域名（可选，生产建议）
 
-1. **域名**：在阿里云 DNS 把 `A` 记录指向 ECS 公网 IP。
-2. **证书**：在阿里云 SSL 证书服务申请免费证书，下载 Nginx 版（`.pem` + `.key`）。
-3. **启用**：把 `nginx.conf` 中底部 `HTTPS 参考` 段落取消注释，并将证书放到 `./certs/`，在 `docker-compose.yml` 的 `nginx` 服务加挂载：
-   ```yaml
-   volumes:
-     - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-     - ./certs:/etc/nginx/certs:ro
-   ```
-   然后 `docker compose up -d nginx` 重新加载。
+当前部署 **app 直出 8000 的纯 HTTP，没有反向代理**。需要 HTTPS 时二选一：
 
-> 另一种更省心的方式：在阿里云 **SLB（负载均衡）** 上挂载 SSL 证书，后端仍然 HTTP 80，由 SLB 做 TLS 终止。
+1. **云厂商 CLB/SLB 做 TLS 终止（最省心，推荐）**：在阿里云 CLB/SLB 上挂载 SSL 证书，前端 443 → 后端 ECS 的 `8000`（HTTP）。后端代码无需改动，证书也不进容器。
+2. **加回 nginx 反代（仍走容器）**：若想在主机上自管 TLS，可恢复历史 `nginx.conf` 模板（已删除，可从 `git log` 取回）并在 `docker-compose.yml` 加回 `nginx` 服务、把 `app` 从 `ports` 改回 `expose`。参考历史版本即可，本文件不重复粘贴。
+
+> 域名解析：在阿里云 DNS 把 `A` 记录指向 ECS 公网 IP 即可。
 
 ---
 
