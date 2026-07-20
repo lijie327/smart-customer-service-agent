@@ -1,24 +1,24 @@
 # 智能客服多 Agent 系统（smart_cs）
 
-基于 **FastAPI + 通义千问 qwen-max** 的多 Agent 智能客服系统：RouterAgent 意图路由调度 4 个专业 Agent（退款 / 技术 / 订单 / 通用），融合 **混合检索 RAG（FAISS 向量 + BM25 + RRF 融合）**、**SQLite 持久化数据层**、**全链路异步 + 真·流式（SSE）**，并具备 **低置信自动转人工闭环** 与 **请求级链路追踪可观测**。
+把通用大模型直接搬进客服场景，会一口气踩中一堆工程坑：**答非所问（幻觉）、一类模型无法分流多类业务、整段生成导致体验卡顿、多轮会话一重启就丢、线上出错无法定位**。本项目是我在校期间为秋招打磨的工程化实践，针对这些痛点逐一给出可落地、可量化、可复现的方案——而不是堆功能。
 
-技术栈：Python · FastAPI · asyncio · LangChain · 通义千问(qwen-max) · FAISS · BM25/RRF · SQLite · Redis · SSE 流式 · 多 Agent 编排
+技术栈：Python · FastAPI · asyncio · LangChain 1.x · 通义千问(qwen-max) · FAISS · BM25/RRF · SQLite · Redis · SSE 流式 · 多 Agent 编排
 
 ---
 
-## ✨ 核心特性
+## 🎯 我解决了哪些工程问题
 
-| 能力 | 说明 |
-|---|---|
-| **多 Agent 编排** | RouterAgent 意图识别 → RefundAgent / TechAgent / OrderAgent / GeneralAgent，职责隔离、工具权限隔离 |
-| **双引擎路由** | 关键词快路径（省 LLM 调用、低延迟）+ LLM 语义分类 + 多轮上下文感知；自建 108 条评测集，准确率 **100%** |
-| **混合检索 RAG** | `HybridFAQRetriever`：FAISS 向量召回 + BM25 关键词召回 → RRF 融合重排 → 返回置信度与引用出处 |
-| **置信度门控抗幻觉** | 检索置信度 ≥0.60 直接命中 FAQ；<0.35 标记低置信并触发转人工 |
-| **全链路异步 + 真流式** | 基于 LangChain Runnable 的 `QwenLLM.astream`（线程+Queue 桥接 DashScope 同步流）；`BaseAgent.astream` 逐 token 真流式，不阻塞事件循环 |
-| **SQLite 持久化** | Repository 模式（订单 / 工单 / 每日指标三表）+ 800 条合成订单 seed，服务重启零丢失 |
-| **转人工闭环** | 低置信 / 兜底话术自动转人工：SSE `escalation` 事件 + 工单 `escalated=1` 落库 + 统计累计 |
-| **可观测** | `RequestTrace / TraceSpan / TraceStore` 环形缓冲 + `/api/traces` 接口 + 前端链路追踪面板 |
-| **现代前端** | 原生 JS SPA，极光玻璃拟态 UI，深/浅色主题切换，助手头像按 Agent 着色 |
+| 工程痛点（真实问题） | 我的方案 | 带来的收益 |
+|---|---|---|
+| **LLM 直接答客服问题会幻觉、编造退款政策** | 混合检索 RAG：`HybridFAQRetriever` 融合 FAISS 向量 + BM25 + RRF 重排，返回**置信度与引用出处**；阈值门控（≥0.60 直接命中 FAQ 真相，<0.35 转人工） | 回答有依据、可溯源，杜绝凭空捏造 |
+| **一类 LLM 无法既懂退款、又懂技术、又懂订单** | `RouterAgent` 意图路由调度 4 个**职责隔离**的专业 Agent（退款/技术/订单/通用），工具权限隔离；原生 function calling 调度 | 每类问题交给最懂的 Agent，新增业务只需加一个 Agent |
+| **等 LLM 生成整段才返回，体验差、像卡死** | 全链路 `asyncio` + **SSE 真·流式**：`QwenLLM.astream` 用线程 + `asyncio.Queue` 桥接 DashScope 同步流，逐 token 输出，不阻塞事件循环 | 打字机式实时响应，长文本也不卡 UI |
+| **多轮对话记忆丢失、服务重启即清空** | `ConversationMemory`：Redis 持久化会话；**Redis 不可用时自动降级内存字典**，不抛异常、不崩 | 长对话连贯，部署容错性强 |
+| **生产环境出错无法定位、无审计证据** | 请求级链路追踪 `RequestTrace / TraceSpan / TraceStore`（环形缓冲）+ `/api/traces` 接口 + 结构化日志 | 每次请求可回放、可审计，排查有据 |
+| **低置信/无答案时用户被晾着、无兜底** | 转人工闭环：低置信或兜底话术自动建工单（`escalated=1` 落库）+ SSE `escalation` 事件播报 | 兜底有界，绝不对用户静默失败 |
+| **"我本地能跑" ≠ "服务器能跑"** | 容器化（`Dockerfile` + `docker-compose`，应用**直出 8000**）；离线评测集 108 样本路由准确率 **100%** | 一键可复现部署，路由质量有量化保障 |
+
+> 上面每一条都是"先有问题，再有设计"，而非功能堆砌。后续的架构图、LangChain 实践、测试与 API 章节，都是这些方案的落地佐证。
 
 ---
 
@@ -105,9 +105,8 @@ smart_cs/
 ├── data/                 # faq_index.*（FAISS 索引）+ smart_cs.db（SQLite，运行时生成，已 gitignore）
 ├── requirements.txt / pyproject.toml / uv.lock
 ├── Dockerfile           # 生产镜像（python:3.13-slim，单 worker）
-├── docker-compose.yml   # 编排：app + redis + nginx（反代）
+├── docker-compose.yml   # 编排：app（直出 8000） + redis
 ├── .dockerignore
-├── nginx.conf           # 反向代理（SSE 长连接友好 + HTTPS 参考）
 ├── DEPLOY.md            # 阿里云 ECS 部署指南
 └── .env.example
 ```
@@ -162,18 +161,18 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 🐳 容器化部署（Docker）
 
-已内置 `Dockerfile` + `docker-compose.yml`（app + redis + nginx 反代），可一键部署到阿里云等云服务器。详见 **[DEPLOY.md](./DEPLOY.md)**。
+已内置 `Dockerfile` + `docker-compose.yml`（应用 **直出 8000** + Redis 会话），可一键部署到阿里云等云服务器。详见 **[DEPLOY.md](./DEPLOY.md)**。
 
 ```bash
 cp .env.example .env          # 填入 DASHSCOPE_API_KEY
 docker compose up -d --build  # 构建并后台启动
-# 浏览器访问 http://<服务器IP>（nginx 在 80 端口反代）
+# 浏览器访问 http://<服务器IP>:8000
 ```
 
 要点：
+- 应用直接对外暴露 8000（未引入反向代理层，部署更轻；需要 HTTPS/域名时可在前面加一层 nginx 或云厂商 SLB）。
 - 数据持久化：`app-data` 卷保存 SQLite + FAISS 索引，`redis-data` 保存会话，重启不丢。
 - 单 worker 运行（规避 SQLite 多进程写锁）；需要更高并发请切换 PostgreSQL 后增加 worker。
-- `nginx.conf` 已关闭代理缓冲并放大超时，原生支持 SSE 长连接；内含 HTTPS 参考配置。
 
 ---
 
@@ -261,10 +260,11 @@ data: {"type": "done", "done": true, "ticket_id": "xxx", "escalated": false}
 
 ## 📝 生产化建议（后续可演进）
 
-- ✅ 部署：已提供 Dockerfile + docker-compose + nginx 反代 + 阿里云部署指南（DEPLOY.md）。
+- ✅ 部署：已提供 Dockerfile + docker-compose（app 直出 8000）+ 阿里云部署指南（DEPLOY.md）。
 - 鉴权：接入 API Key / JWT，CORS 经 `ALLOWED_ORIGINS` 收口到前端域名。
 - 数据库：SQLite → aiosqlite / PostgreSQL（异步驱动）以支持多 worker 水平扩展。
 - 可观测：进程内 TraceStore → OpenTelemetry / Langfuse（仅替换 push/log 实现）。
+- HTTPS / 域名：当前为 http 直出 8000；需要 TLS 时可在应用前加一层 nginx 反代或云厂商 SLB 做 TLS 终止（compose 改回 `ports`→`expose` + 加 nginx 服务即可）。
 
 ## 📄 许可证
 
