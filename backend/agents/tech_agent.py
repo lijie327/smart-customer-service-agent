@@ -43,8 +43,7 @@ class TechAgent(BaseAgent):
 4. 不要说"您好"、不要自我介绍
 5. 如果FAQ有答案直接给，没有就说"建议联系人工客服"
 
-工具调用格式：
-[TOOL_CALL]search_faq(query="问题关键词")[/TOOL_CALL]"""
+可用工具：search_faq（检索 FAQ 知识库，通过 function calling 直接调用）"""
 
         super().__init__(
             name="TechAgent",

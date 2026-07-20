@@ -37,11 +37,11 @@ class GeneralAgent(BaseAgent):
 3. 清晰、友好地回答用户问题
 4. 如无法解答或用户要求，转接人工客服
 
-工具使用指南：
-- 搜索FAQ：[TOOL_CALL]search_faq(query="问题关键词")[/TOOL_CALL]
-- 查询政策：[TOOL_CALL]search_policy(policy_type="政策类型")[/TOOL_CALL]
-- 获取当前时间：[TOOL_CALL]get_current_time()[/TOOL_CALL]
-- 转人工客服：[TOOL_CALL]escalate_to_human(reason="转接原因", priority="优先级")[/TOOL_CALL]
+可用工具（通过 function calling 直接调用，无需拼接文本格式）：
+- search_faq：搜索 FAQ 知识库
+- search_policy：查询政策
+- get_current_time：获取当前时间
+- escalate_to_human：转接人工客服（reason / priority）
 
 回答原则：
 - 态度友好、耐心

@@ -31,9 +31,9 @@ class OrderAgent(BaseAgent):
 5. 简洁回复，15字以内告知结果
 6. 不要说"您好"、不要废话、不要自我介绍
 
-工具调用格式：
-[TOOL_CALL]query_order_status(order_id="订单号")[/TOOL_CALL]
-[TOOL_CALL]get_order_detail(order_id="订单号")[/TOOL_CALL]"""
+可用工具（通过 function calling 直接调用）：
+- query_order_status(order_id)：查询订单状态
+- get_order_detail(order_id)：查询订单详情"""
 
         super().__init__(
             name="OrderAgent",

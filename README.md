@@ -61,7 +61,7 @@ approve_refund  置信度门控      query_order    search_faq
 |---|---|
 | **自定义 ChatModel** | `QwenLLM(BaseChatModel)`：把阿里云百炼（DashScope）通义千问封装为标准 LangChain `Runnable`，实现 `_generate / _agenerate / _stream / _astream`，对外暴露统一的 `invoke / ainvoke / stream / astream`。 |
 | **自定义 Embeddings** | `QwenEmbeddings(Embeddings)`：把通义千问向量模型封装为 LangChain `Embeddings`，直接喂给 `FAISS` 向量检索与 `EnsembleRetriever`，是混合检索 RAG 的向量通道。 |
-| **原生 function calling（非手写正则）** | Agent 工具调度基于 `llm.bind_tools(tools)`：模型返回结构化的 `AIMessage.tool_calls`，ReAct 循环**直接读取结构化 `tool_calls`** 执行工具并回填 `ToolMessage`，彻底替代早期手写的 `[TOOL_CALL]...[/TOOL_CALL]` 正则解析（更稳、可扩展、贴合官方范式）。 |
+| **原生 function calling（非手写正则）** | Agent 工具调度基于 `llm.bind_tools(tools)`：模型返回结构化的 `AIMessage.tool_calls`，ReAct 循环**直接读取结构化 `tool_calls`** 执行工具并回填 `ToolMessage`，彻底替代早期手写的 `[TOOL_CALL]...[/TOOL_CALL]` 正则解析——该旧实现已从代码与提示词中移除（更稳、可扩展、贴合官方范式）。 |
 | **全链路 LCEL + 异步真流式** | 异步入口走 `ainvoke / astream`；`astream` 通过线程 + `asyncio.Queue` 桥接 DashScope 同步流，在 FastAPI 事件循环内逐 token 输出，不阻塞。 |
 | **消息协议对齐** | 所有 LLM 交互统一使用 `HumanMessage / AIMessage / SystemMessage / ToolMessage`，与 LangChain 回调、tracing、`RunnableBinding` 天然兼容。 |
 
@@ -243,7 +243,7 @@ data: {"type": "done", "done": true, "ticket_id": "xxx", "escalated": false}
 
 **工具集**：`query_order_status` / `approve_refund` / `get_order_detail`（订单）· `search_faq` / `search_policy`（知识库）· `get_current_time` / `escalate_to_human` / `validate_user_input`（系统）
 
-> 工具调度统一基于 LangChain **`bind_tools` 原生 function calling**：`BaseAgent.__init__` 把工具绑定到 `QwenLLM`（`llm.bind_tools(tools)`），模型返回结构化 `AIMessage.tool_calls`，ReAct 循环直接读取并执行、回填 `ToolMessage`，**不再使用手写正则解析 `[TOOL_CALL]`**。
+> 工具调度统一基于 LangChain **`bind_tools` 原生 function calling**：`BaseAgent.__init__` 把工具绑定到 `QwenLLM`（`llm.bind_tools(tools)`），模型返回结构化 `AIMessage.tool_calls`，ReAct 循环直接读取并执行、回填 `ToolMessage`——全程原生协议，无手写正则解析。
 
 ---
 
