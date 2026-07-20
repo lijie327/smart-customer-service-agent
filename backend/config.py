@@ -35,9 +35,14 @@ class Config:
     def LLM_MODEL(self) -> str:
         return os.getenv("LLM_MODEL", "qwen-max")
 
-    # 服务器配置
-    HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    # 服务器配置（可通过环境变量覆盖，详见 .env.example）
+    @property
+    def HOST(self) -> str:
+        return os.getenv("HOST", "0.0.0.0")
+
+    @property
+    def PORT(self) -> int:
+        return int(os.getenv("PORT", "8000"))
 
     @property
     def REDIS_HOST(self) -> str:
@@ -75,9 +80,12 @@ class Config:
     def ALLOW_CREDENTIALS(self) -> bool:
         return os.getenv("ALLOW_CREDENTIALS", "false").lower() == "true"
 
-    # 数据层：SQLite 数据库文件路径
+    # 数据层：SQLite 数据库文件路径（可通过 DB_PATH 环境变量覆盖，详见 .env.example）
     @property
     def DB_PATH(self) -> str:
+        env = os.getenv("DB_PATH")
+        if env:
+            return env
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(root, "data", "smart_cs.db")
 

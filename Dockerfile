@@ -24,4 +24,4 @@ EXPOSE 8000
 
 # 单 worker：避免 SQLite 多进程写锁（多 worker 会触发 database is locked）。
 # SSE 长连接友好；如要更高并发，请改用 PostgreSQL + aiosqlite 并增加 worker 数。
-CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --workers 1"]
